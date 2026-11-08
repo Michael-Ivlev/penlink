@@ -188,7 +188,7 @@ Order for one `open`: `opened` → (`title`) → `window` → `offer` → `ice`*
 - `{"t":"ping","c":<phone µs>}` on `input` -> host answers `{"t":"pong","c":<same>,"h":<host µs>}` at once.
 - Host -> phone `{"t":"lat","inj":..,"cap":..,"conv":..,"enc":..,"snd":..}` (µs, once per input event): input received ->
   injected, injected -> frame captured, captured -> encode start, encode, write to the track. The phone's debug overlay
-  (debug builds, `--ez latency true|false`) adds RTT, jitter buffer and decode time from the WebRTC stats.
+  (off by default; Settings > Connection > "Show performance stats", saved; debug intent `--ez latency true|false`) adds RTT, jitter buffer and decode time from the WebRTC stats.
   `penlink-host --verbose` with `RUST_LOG=penlink_host::latency=debug` logs the same stages.
 - Measuring: `examples/latprobe.rs` (loopback client) sends a mouse-down and times it until a decoded frame shows
   testpad's flash strip flip (testpad flips the bottom strip on every key, click and pointer-down).

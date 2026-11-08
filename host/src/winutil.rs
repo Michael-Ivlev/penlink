@@ -9,7 +9,7 @@ use windows::Win32::Graphics::Dwm::{
     DwmGetWindowAttribute, DWMWA_CLOAKED, DWMWA_EXTENDED_FRAME_BOUNDS,
 };
 use windows::Win32::Graphics::Gdi::ClientToScreen;
-use windows::Win32::System::Com::{CoInitializeEx, CoUninitialize, COINIT_APARTMENTTHREADED};
+use windows::Win32::System::Com::{CoIncrementMTAUsage, CoInitializeEx, CoUninitialize, COINIT_APARTMENTTHREADED};
 use windows::Win32::System::Threading::{
     AttachThreadInput, GetCurrentProcessId, GetCurrentThreadId, OpenProcess, QueryFullProcessImageNameW,
     PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION,
@@ -39,6 +39,12 @@ pub fn init_process() {
     static ONCE: std::sync::Once = std::sync::Once::new();
     ONCE.call_once(|| unsafe {
         let _ = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+        // Keep the multithreaded apartment alive for the whole process. Each capture thread
+        // joins it with RoInitialize; when the last one exits (a session closed) the apartment
+        // is torn down and WinRT DLLs unload, leaving the cached activation factories
+        // (windows-rs FactoryCache) dangling: the next session crashed in
+        // Direct3D11CaptureFramePool::CreateFreeThreaded with an access violation.
+        let _ = CoIncrementMTAUsage();
     });
 }
 

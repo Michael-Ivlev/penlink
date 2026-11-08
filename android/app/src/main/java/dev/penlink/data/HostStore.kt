@@ -20,6 +20,9 @@ private val HOSTS_KEY = stringPreferencesKey("hosts")
 /** Stream settings are remembered per PC (key `stream:<address>`). */
 private fun streamKey(address: String) = stringPreferencesKey("stream:$address")
 
+/** Notification forwarding settings are remembered per PC (key `notif:<address>`). */
+private fun notifKey(address: String) = stringPreferencesKey("notif:$address")
+
 class HostStore(private val context: Context) {
     private val json = Json { ignoreUnknownKeys = true }
     private val ser = ListSerializer(SavedHost.serializer())
@@ -48,5 +51,23 @@ class HostStore(private val context: Context) {
 
     suspend fun setStreamPrefs(address: String, prefs: StreamPrefs) {
         context.dataStore.edit { it[streamKey(address)] = prefs.encode() }
+    }
+
+    fun notifPrefs(address: String): Flow<NotifPrefs> =
+        context.dataStore.data.map { NotifPrefs.decode(it[notifKey(address)]) }
+
+    /** Read-modify-write inside one DataStore transaction. */
+    suspend fun updateNotifPrefs(address: String, change: (NotifPrefs) -> NotifPrefs) {
+        context.dataStore.edit { prefs ->
+            val cur = NotifPrefs.decode(prefs[notifKey(address)])
+            val next = change(cur)
+            if (next != cur) prefs[notifKey(address)] = next.encode()
+        }
+    }
+
+    /** The saved PCs whose notification switch is on (changes as PCs or switches change). */
+    val notifHosts: Flow<List<SavedHost>> = context.dataStore.data.map { prefs ->
+        val all = prefs[HOSTS_KEY]?.let { runCatching { json.decodeFromString(ser, it) }.getOrNull() } ?: emptyList()
+        all.filter { NotifPrefs.decode(prefs[notifKey(it.address)]).enabled }
     }
 }

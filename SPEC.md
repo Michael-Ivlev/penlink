@@ -212,6 +212,7 @@ All `x`,`y` are normalised 0..1 over the video frame (0,0 = top-left).
    apps with icons and a search box. Tapping a tile of an app that is already open resumes it instead of starting it
    again. Android Back here with apps open sends Penlink to the background (sessions stay); the arrow in the top bar
    leaves the PC (after a confirmation when apps are open: they are closed).
+   A bell in the top bar opens the **Notifications** page of that PC (see "Notifications").
 3. **Session:** only the app, full screen (immersive, no system bars, inside the safe area) plus the extra-keys row
    when the keyboard is up. No tab bar. A thin pill sits in the top strip (the black status-bar/cutout margin above the
    video, so it never covers the remote app); tap it or swipe down on it to open a control bar (auto-hides after 4 s):
@@ -284,6 +285,51 @@ tabs in a "reconnecting" state, retries with backoff (0.5, 1, 2, 4, 5 s) and, on
 every tab with open + "attach":true (same appId, new session). After 30 s without success it shows
 that the PC is unreachable with a Retry button (and keeps trying every 10 s). A tab whose app has exited
 comes back as closed with reason pp exited and is removed.
+## Notifications (PC toasts on the phone)
+Windows notifications (toasts) of the PC are forwarded to the phone, for example "Claude finished a task".
+
+**Host.** `UserNotificationListener` (`notifications.rs`). At start the host reads `GetAccessStatus`; if it is
+`Unspecified` it prints a line and calls `RequestAccessAsync` once (Windows asks the user to Allow); if it is
+`Denied` it prints where to switch it on (Settings > Privacy & security > Notifications). `--no-notifications`
+turns the feature off. While at least one phone is connected to `/notify` the host polls
+`GetNotificationsAsync(Toast)` every second (no `NotificationChanged` event: it wants a registered background task)
+and diffs by notification id; with no phone connected it does nothing. Per notification: app display name,
+AppUserModelId (`appId`), title (first text element), body (the others joined by newlines, clamped to 2000 chars),
+creation time, id, and the app logo (cached by `appId`). Penlink's own notifications are skipped. Notification
+text is never logged. Identity of the notification: its Windows id; ids can be reused after a restart, so the phone
+resyncs on every connect (`ready`).
+
+**`GET /notify?token=...`** (WebSocket, JSON text frames, authenticated like `/ws`; 404 when the host runs with
+`--no-notifications`). Host pings every 4 s, 12 s of silence ends it. The phone keeps it open with no session.
+- Host -> phone `{"type":"ready","ids":[12,15],"access":"allowed"}`: sent first; `ids` = notifications that exist
+  on the PC now (the phone removes its own that are not listed; existing ones are NOT forwarded), `access` =
+  `allowed|denied|unspecified|unavailable` (`unavailable` = Windows refused the host the API).
+- Host -> phone `{"type":"notification","id":12,"appId":"Claude_x!App","appName":"Claude","title":"Done","body":"Task finished","time":1700000000000,"openAppId":"ab12cd"}`
+  `time` = Unix ms. `openAppId` (optional) = the `/apps` id of the same app (packaged app with the same AUMID, else
+  an app with the same display name); missing when the host cannot map it.
+- Host -> phone `{"type":"notificationRemoved","id":12}`: it left the PC's Action Center (dismissed or expired).
+- Phone -> host `{"type":"dismissNotification","id":12}`: the user dismissed it on the phone; the host calls
+  `RemoveNotification(id)`.
+
+**`GET /appicon?appId=<AppUserModelId>`** (bearer): the logo Windows gave for that app (usually PNG), 404 until a
+notification of the app has been seen.
+
+**Phone.** Filtering is on the phone. `NotificationForwardService` is a foreground service of type `specialUse`
+(`dataSync` is cut after six hours on Android 15, `connectedDevice` needs a Bluetooth/USB/NFC-style link) that keeps
+one `/notify` socket per PC whose switch is on, reconnecting with backoff 1, 2, 5, 10, 30 s (then every 30 s). Its
+one low-importance ongoing notification says "Connected to <PC>". It stops itself when no PC has the switch on,
+is sticky, survives swiping the app away and restarts after boot (`RECEIVE_BOOT_COMPLETED`) and app update.
+`POST_NOTIFICATIONS` is requested when the switch is turned on.
+- Each PC notification becomes an Android notification: channel per PC app (channel group = the PC, so sound and
+  importance are tuned per app in Android settings), the app logo as large icon, title, text (BigTextStyle), the
+  PC's timestamp, the app name as sub text. Tag `pc:<address>`, id = the Windows id.
+- Tap: opens Penlink, connects to that PC and opens the app full screen (an already open session is resumed); with
+  no `openAppId` it opens that PC's Apps screen.
+- Removed on the PC -> removed on the phone. Swiped away on the phone -> `dismissNotification` (when the socket is up).
+- **Notifications page** (Apps screen top bar, bell icon): switch "Forward notifications from this PC" (default
+  off), then one switch per app seen so far (default on, newest first). Saved per PC in DataStore (`notif:<address>`).
+  It shows notices when Android blocks notifications or Windows does not share them (`access`).
+
 ## Done means
 - `cargo build --release` and `cargo test` pass in `host/`.
 - `./gradlew assembleDebug` and unit tests pass in `android/`.

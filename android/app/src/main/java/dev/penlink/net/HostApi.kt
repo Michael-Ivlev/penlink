@@ -73,6 +73,20 @@ class HostApi(val http: OkHttpClient = defaultClient()) {
         }.getOrNull()
     }
 
+    /** Logo of the PC app behind a forwarded notification (`GET /appicon?appId=`), or null. */
+    suspend fun notifIcon(address: String, token: String, appId: String): Bitmap? {
+        val enc = java.net.URLEncoder.encode(appId, "UTF-8")
+        val req = Request.Builder().url(HostAddress.httpBase(address) + "/appicon?appId=$enc").auth(token).build()
+        return runCatching {
+            http.newCall(req).await().use { resp ->
+                if (!resp.isSuccessful) null
+                else withContext(Dispatchers.Default) {
+                    resp.body.bytes().let { BitmapFactory.decodeByteArray(it, 0, it.size) }
+                }
+            }
+        }.getOrNull()
+    }
+
     private fun Request.Builder.auth(token: String) = header("Authorization", "Bearer $token")
 
     companion object {

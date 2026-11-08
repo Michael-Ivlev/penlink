@@ -47,6 +47,7 @@ import androidx.compose.material.icons.automirrored.filled.ExitToApp
 import androidx.compose.material.icons.filled.Apps
 import androidx.compose.material.icons.filled.Clear
 import androidx.compose.material.icons.filled.CloudOff
+import androidx.compose.material.icons.filled.Notifications
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.SearchOff
@@ -178,6 +179,9 @@ fun AppsScreen(app: PenlinkApp, conn: HostConnection) {
                     IconButton(onClick = leave) { Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back to PCs") }
                 },
                 actions = {
+                    IconButton(onClick = { haptics.tap(); app.navigate(Screen.Notifications) }) {
+                        Icon(Icons.Default.Notifications, contentDescription = "Notifications from this PC")
+                    }
                     IconButton(onClick = { haptics.tap(); reload++ }) { Icon(Icons.Default.Refresh, contentDescription = "Reload apps") }
                 },
                 colors = TopAppBarDefaults.topAppBarColors(

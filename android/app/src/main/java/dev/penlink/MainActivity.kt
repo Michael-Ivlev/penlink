@@ -9,7 +9,10 @@ import android.widget.Toast
 import androidx.lifecycle.lifecycleScope
 import dev.penlink.data.Quality
 import dev.penlink.data.SavedHost
+import dev.penlink.notify.NotificationForwardService
+import dev.penlink.notify.PcNotifier
 import dev.penlink.protocol.AppEntry
+import dev.penlink.rtc.SessionStatus
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import androidx.activity.ComponentActivity
@@ -43,6 +46,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.ui.platform.LocalContext
 import dev.penlink.ui.AppsScreen
 import dev.penlink.ui.HostsScreen
+import dev.penlink.ui.NotificationsScreen
 import dev.penlink.ui.SessionScreen
 
 class MainActivity : ComponentActivity() {
@@ -68,7 +72,12 @@ class MainActivity : ComponentActivity() {
             }
         }
         startService(Intent(this, TaskWatchService::class.java))
+        // Forwarding stays on across app launches, reboots and process deaths.
+        lifecycleScope.launch {
+            if (app.store.notifHosts.first().isNotEmpty()) NotificationForwardService.start(this@MainActivity)
+        }
         handleDebugIntent(intent)
+        handleNotificationTap(intent, coldStart = savedInstanceState == null)
     }
 
     /**
@@ -84,6 +93,37 @@ class MainActivity : ComponentActivity() {
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         handleDebugIntent(intent)
+        handleNotificationTap(intent, coldStart = false)
+    }
+
+    /**
+     * A forwarded PC notification was tapped: connect to that PC and show the app the notification came from
+     * full screen (resuming it when it is already open); when the app cannot be mapped, show the PC's Apps screen.
+     */
+    private fun handleNotificationTap(intent: Intent?, coldStart: Boolean) {
+        if (intent?.action != PcNotifier.ACTION_OPEN) return
+        val address = intent.getStringExtra(PcNotifier.EXTRA_HOST) ?: return
+        val appId = intent.getStringExtra(PcNotifier.EXTRA_APP_ID)?.takeIf { it.isNotBlank() }
+        val appName = intent.getStringExtra(PcNotifier.EXTRA_APP_NAME) ?: ""
+        intent.action = null
+        val app = application as PenlinkApp
+        lifecycleScope.launch {
+            val host = app.store.hosts.first().firstOrNull { it.address == address } ?: return@launch
+            val conn = app.connect(host)
+            if (appId == null) {
+                app.navigate(Screen.Apps)
+                return@launch
+            }
+            // The window insets (safe area) arrive with the first layout; wait for them on a cold start.
+            if (coldStart) kotlinx.coroutines.delay(300)
+            val running = conn.sessions.value.lastOrNull { it.appId == appId && it.status.value !is SessionStatus.Closed }
+            val s = running ?: run {
+                val prefs = app.store.streamPrefs(host.address).first()
+                val (w, h) = windowPixels()
+                conn.open(AppEntry(appId, appName), w, h, prefs)
+            }
+            app.navigate(Screen.Session(s.localId))
+        }
     }
 
     /**
@@ -150,6 +190,7 @@ private data class Dest(val screen: Screen, val conn: HostConnection?)
 private fun Screen.depth(): Int = when (this) {
     Screen.Hosts -> 0
     Screen.Pair, Screen.Apps -> 1
+    Screen.Notifications -> 2
     is Screen.Session -> 2
 }
 
@@ -183,7 +224,7 @@ private fun Root(app: PenlinkApp) {
     LaunchedEffect(conn) {
         conn?.notices?.collect { Toast.makeText(ctx, it, Toast.LENGTH_LONG).show() }
     }
-    val needsConn = screen is Screen.Apps || screen is Screen.Session
+    val needsConn = screen is Screen.Apps || screen is Screen.Session || screen is Screen.Notifications
     val shown = if (needsConn && conn == null) Screen.Hosts else screen
     AnimatedContent(
         targetState = Dest(shown, conn),
@@ -196,6 +237,7 @@ private fun Root(app: PenlinkApp) {
             Screen.Hosts -> HostsScreen(app)
             Screen.Pair -> PairScreen(app)
             Screen.Apps -> if (c != null) AppsScreen(app, c) else HostsScreen(app)
+            Screen.Notifications -> if (c != null) NotificationsScreen(app, c.host) else HostsScreen(app)
             is Screen.Session -> if (c != null) SessionScreen(app, c, s.localId) else HostsScreen(app)
         }
     }

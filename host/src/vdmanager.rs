@@ -130,6 +130,14 @@ impl VdManager {
     fn setup(&self, guid: &Guid, width: u32, height: u32, dpi_wanted: u32) -> std::result::Result<VMonitor, (anyhow::Error, Option<String>)> {
         let added = self.backend.add(guid, width, height, REFRESH_RATE).map_err(|e| (e, None))?;
         let gdi = added.gdi_name.clone();
+        // Windows remembers the mode a monitor identity had last (a re-added GUID comes back at
+        // its old size, e.g. after the phone rotated), whatever the driver was asked for.
+        if added.rect.w != width as i32 || added.rect.h != height as i32 {
+            tracing::info!("{gdi} came back as {}x{}, asking for {width}x{height}", added.rect.w, added.rect.h);
+            if !self.backend.try_set_mode(&gdi, width, height) {
+                return Err((anyhow!("Windows kept the virtual monitor at {}x{} instead of {width}x{height}", added.rect.w, added.rect.h), Some(gdi)));
+            }
+        }
         let (x, y) = place_right_of(&self.backend.other_monitor_rects(&gdi));
         if let Err(e) = self.backend.position(&gdi, x, y) {
             // Usable where Windows put it; the phone only needs the rectangle.

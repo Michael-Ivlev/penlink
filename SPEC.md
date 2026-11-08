@@ -37,25 +37,45 @@ Hardware encode and the Mac host come later. The virtual monitor per app is buil
   adapter to the first hardware GPU (`PENLINK_RENDER_ADAPTER` overrides by name).
 - **When:** the driver is usable and the `open` carries `quality` or `uiScale` (and the host was not started with
   `--no-vdisplay`). Otherwise, or if any step fails, version 1 window capture is used and `window.mode` says `window`.
-- **One monitor per session:** created at the phone's size (sharp) or half of it (fast), DPI set to the UI size
-  (fast: half), placed right of all monitors (never primary, only that device is changed). The app window is moved
+- **One monitor per session:** its size and DPI come from the phone's safe-area size and the UI size (see "UI size"
+  below), placed right of all monitors (never primary, only that device is changed). The app window is moved
   onto it and maximised; the host captures the MONITOR, so menus, popups and dialogs show. Input maps to the monitor
   rectangle. Input is accepted while the foreground window belongs to the app (its process or owned by its window)
   and is on that monitor.
 - **What is streamed:** the monitor's work area (the monitor minus the taskbar Explorer adds to every display, which
   appears some seconds after the monitor does; the host checks every 750 ms, follows a changed size or position and
   sends a new `window` message). The phone draws the video aspect-fit (black bars when the work area is a little
-  shorter than the screen). Windows caps the DPI step by resolution (the smaller side divided by the scale stays at
-  least 640 px, e.g. 225% at 1440x3120), so a higher `uiScale` is clamped; `window.dpi` and the settings readout show
-  what was applied.
+  shorter than the screen). `window.dpi` and the settings readout show the DPI that Windows really applied.
+- **UI size (phone design):** `uiScale` is the UI size in percent. By default (`quality` `"fast"`, "Sharp text" off)
+  the UI size is made by LOWER RESOLUTION: monitor = `width/uiScale*100` x `height/uiScale*100` (even numbers), Windows
+  DPI 100%, and the phone upscales the video (200% on a 1440x3120 phone = a 720x1560 monitor; fewer pixels also encode
+  faster). With "Sharp text" on (`quality` `"sharp"`) the monitor keeps the full size and Windows DPI scaling does the
+  UI size; Windows caps it (the smaller side divided by the scale stays at least 640 px: 225% at 1440 px, 200% at
+  1280 px), the nearest allowed step is used and reported in `window.dpi`. Measured with SudoVDA on Windows 11: the
+  smallest monitor modes that become active are 200x433 and 520x240 (160x347 and 400x188 do not); the host never goes
+  below 200 px on a side. Apps need room (the test app cannot be narrower than about 396 px), so the phone's slider
+  keeps the smaller monitor side at 400 px or more: low-resolution range = 100%..`floor(smallerSide/400*4)*25`%
+  in 25% steps (1440 px: 100..350%, 1280 px: 100..300%), sharp-text range = the Windows steps up to the cap above.
+  Every step gives a different monitor size, so each one visibly changes the UI. Saved per PC as `v2:<fast|sharp>:<ui>`;
+  older saved values (test values) become the default (low resolution, 200%).
+- **Safe area:** the phone sends the size of its safe area (the window minus the display cutout and the system bars,
+  both orientations) as `width`/`height`, draws the video and maps touch inside it and paints the rest black. The
+  monitor therefore fills exactly the visible area.
 - **Keyboard:** the monitor stays. The window is restored and sized to the top rows and only those rows are
   streamed (the video is exactly the area above the keyboard, so the phone needs no cropping).
   Hiding the keyboard maximises the window again.
 - **Rotation / quality change:** the monitor is switched to the new mode (if Windows accepts it, tested first) or
   removed and re-added under the same GUID; position, DPI and maximise are applied again.
-- **Lifetime:** closing a tab removes the monitor at once; the window goes back to the primary monitor (the host
-  moves it itself). A dropped WebSocket keeps the monitor 2 minutes; `open` with `attach` takes it over. Host exit
-  (Ctrl+C, console close) removes all. Monitor GUIDs (marker `PENLINK!`, serial `PENLINK*****`) are listed in
+- **Lifetime:** closing a tab, leaving the app (back out of the PC, activity destroyed, app swiped away: the phone
+  sends `close` for every tab and then a WebSocket close frame, from `onDestroy` and from a service's `onTaskRemoved`)
+  removes the monitor at once and the window goes back to the primary monitor (the host moves it itself); measured:
+  about 0.3 s on the host, under 0.5 s until the monitor is gone from the desktop. The host stops the capture, removes
+  the monitor, and only then closes the peer connection. A broken connection (no close frame: network drop, phone
+  killed) is noticed at once when the TCP connection ends, or after 12 s of silence otherwise (the host pings every
+  4 s); the monitor is then kept 5 s (`GRACE`, checked every 0.5 s) so that a short blip re-attaches to it, after
+  which it is removed and the window goes to the primary monitor; a phone that comes back later gets a new monitor.
+  `open` with `attach` also takes over what its own old, not yet noticed as dead connection still holds. A removal
+  that fails is retried every 0.5 s (up to 20 times). Host exit (Ctrl+C, console close) removes all. Monitor GUIDs (marker `PENLINK!`, serial `PENLINK*****`) are listed in
   `%APPDATA%\Penlinkdisplays.json` and removed at the next start if the host crashed.
 
 ### Driver install
@@ -79,7 +99,7 @@ Hardware encode and the Mac host come later. The virtual monitor per app is buil
 
 ## Protocol (both sides must match this exactly)
 
-Host listens on **TCP 47800**, plain HTTP + WebSocket (Tailscale encrypts).
+Host listens on **TCP 47800** (`PENLINK_VD_LEDGER` points the monitor ledger elsewhere for a second host used in tests), plain HTTP + WebSocket (Tailscale encrypts).
 It accepts connections only from loopback, Tailscale (100.64.0.0/10) and, when
 started with `--allow-lan`, private LAN ranges. Android emulator reaches the
 host at `10.0.2.2`, which arrives at the host as loopback.
@@ -109,7 +129,7 @@ WebRTC peer connection.
 
 Phone → host:
 - `{"type":"open","appId":"...","width":1440,"height":3120,"scale":2.0,"attach":false}`
-  width/height = video size in pixels; scale = how much bigger the phone wants
+  width/height = the phone's safe-area size in pixels (display cutout and system bars excluded; for old clients: the video size); scale = how much bigger the phone wants
   the UI than 100% (the host sizes the window to width/scale × height/scale
   and the video stays at width×height). The encoder limit is 3840×2160 (or 2160×3840): a larger
   request keeps its aspect ratio and the video is scaled down to fit that box.
@@ -121,11 +141,14 @@ Phone → host:
 - `{"type":"answer","sessionId":"...","sdp":"..."}`
 - `{"type":"ice","sessionId":"...","candidate":"...","sdpMid":"0","sdpMLineIndex":0}`
 - `{"type":"resize","sessionId":"...","width":3120,"height":1440,"scale":2.0,"quality":"sharp","uiScale":300}`
-  `quality` `"sharp"` (monitor = phone pixels) or `"fast"` (half, video upscaled on the phone) and `uiScale`
-  (percent, 100-500; Windows DPI steps 100,125,150,175,200,225,250,300,350,400,450,500) are optional on `open`
+  `quality` `"fast"` (UI size by low resolution: monitor = size / uiScale at DPI 100%, the video is upscaled on the
+  phone) or `"sharp"` (monitor = phone pixels, Windows DPI = uiScale, capped by Windows) and `uiScale`
+  (percent, 100-800 accepted; the phone offers less, see "UI size") are optional on `open`
   and `resize`. Without `uiScale`, `scale*100` is used; without `quality`, sharp. Sending either asks for a
-  virtual monitor. Window capture honours them too (video halves in fast, window size stays).
-- `{"type":"close","sessionId":"..."}`
+  virtual monitor. Window capture honours them too (fast: the window is video-sized, sharp: width/uiScale).
+- `{"type":"close","sessionId":"..."}` closes one session; a WebSocket close frame (code 1000) means the phone left
+  on purpose: every session ends now and the virtual monitors go at once. Any other end of the connection is a
+  drop (see "Lifetime").
 - `{"type":"keyframe","sessionId":"..."}` ask for a new keyframe
 
 Host → phone:

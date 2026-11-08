@@ -10,46 +10,66 @@ import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
-import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class StreamPrefsTest {
     private fun obj(s: String) = Json.parseToJsonElement(s).jsonObject
 
     @Test
-    fun defaults_are_sharp_and_phone_app_sized() {
+    fun default_is_low_resolution_at_200_percent_without_sharp_text() {
         val p = StreamPrefs()
-        assertEquals(Quality.Sharp, p.quality)
-        assertEquals(300, p.uiScale)
-        assertEquals(3.0, p.scaleFactor, 0.0)
+        assertFalse(p.sharpText)
+        assertEquals(Quality.Fast, p.quality)
+        assertEquals(200, p.uiScale)
+        // 1440x3120 / 2.0 = the 720x1560 monitor the old Fast gave
+        assertEquals(720, 1440 * 100 / p.uiScale)
+        assertEquals(1560, 3120 * 100 / p.uiScale)
     }
 
     @Test
-    fun encode_decode_roundtrip_and_junk() {
-        val p = StreamPrefs(Quality.Fast, 250)
-        assertEquals("fast:250", p.encode())
+    fun encode_decode_roundtrip() {
+        val p = StreamPrefs(true, 150)
+        assertEquals("v2:sharp:150", p.encode())
         assertEquals(p, StreamPrefs.decode(p.encode()))
-        assertEquals(StreamPrefs(), StreamPrefs.decode(null))
-        assertEquals(StreamPrefs(), StreamPrefs.decode("nonsense"))
-        assertEquals(StreamPrefs(), StreamPrefs.decode("fast:abc"))
-        // an unknown quality falls back to sharp, an odd size snaps to a step
-        assertEquals(StreamPrefs(Quality.Sharp, 175), StreamPrefs.decode("weird:180"))
+        assertEquals(StreamPrefs(false, 300), StreamPrefs.decode("v2:fast:300"))
     }
 
     @Test
-    fun snapping_goes_to_the_nearest_windows_step_ties_up() {
-        assertEquals(100, StreamPrefs.snap(10))
-        assertEquals(400, StreamPrefs.snap(900))
-        assertEquals(300, StreamPrefs.snap(275))
-        assertEquals(250, StreamPrefs.snap(260))
-        assertEquals(125, StreamPrefs.snap(115))
-        assertTrue(StreamPrefs.UI_STEPS.all { StreamPrefs.snap(it) == it })
+    fun old_saved_values_and_junk_become_the_new_default() {
+        for (old in listOf("sharp:300", "fast:250", "sharp:100", "weird:180", "fast:abc", "nonsense", "", null, "v2:fast:x", "v2:fast")) {
+            assertEquals("for $old", StreamPrefs(), StreamPrefs.decode(old))
+        }
     }
 
     @Test
-    fun fast_asks_windows_for_half_the_dpi() {
-        assertEquals(300, StreamPrefs.dpiAsked(StreamPrefs(Quality.Sharp, 300)))
-        assertEquals(150, StreamPrefs.dpiAsked(StreamPrefs(Quality.Fast, 300)))
+    fun low_resolution_range_on_the_s26_is_100_to_350_in_25_steps() {
+        val steps = StreamPrefs.steps(false, 1440, 3120)
+        assertEquals(100, steps.first())
+        assertEquals(350, steps.last())
+        assertEquals(11, steps.size)
+        // portrait and landscape give the same range (the smaller side is 1440 either way)
+        assertEquals(steps, StreamPrefs.steps(false, 3120, 1440))
+        // a smaller screen gets a smaller maximum
+        assertEquals(250, StreamPrefs.maxLowRes(1080, 2400))
+        // every step is a different monitor width
+        assertEquals(steps.size, steps.map { 1440 * 100 / it / 2 * 2 }.toSet().size)
+    }
+
+    @Test
+    fun sharp_text_range_follows_windows_dpi_cap() {
+        assertEquals(listOf(100, 125, 150, 175, 200, 225), StreamPrefs.steps(true, 1440, 3120))
+        assertEquals(225, StreamPrefs.maxSharp(1440, 3120))
+        assertEquals(150, StreamPrefs.maxSharp(1080, 2400)) // 1080 / 6.4 = 168
+        assertEquals(100, StreamPrefs.maxSharp(500, 900))
+    }
+
+    @Test
+    fun fitted_moves_the_ui_size_into_the_range_of_the_mode() {
+        assertEquals(225, StreamPrefs(true, 400).fitted(1440, 3120).uiScale)
+        assertEquals(200, StreamPrefs(false, 200).fitted(1440, 3120).uiScale)
+        assertEquals(350, StreamPrefs(false, 500).fitted(1440, 3120).uiScale)
+        assertEquals(300, StreamPrefs.snap(290, listOf(100, 200, 300, 400)))
+        assertEquals(300, StreamPrefs.snap(250, listOf(100, 200, 300)))
     }
 
     @Test
@@ -61,7 +81,6 @@ class StreamPrefsTest {
         val r = obj(WsOut.resize("s", 1440, 1500, 3.0, "sharp", 300))
         assertEquals("sharp", r["quality"]!!.jsonPrimitive.content)
         assertEquals(300, r["uiScale"]!!.jsonPrimitive.content.toInt())
-        // old shape is unchanged when the fields are not given
         assertFalse(WsOut.open("a", 1, 2, 1.0).contains("quality"))
         assertFalse(WsOut.resize("s", 1, 2, 1.0).contains("uiScale"))
     }
@@ -72,7 +91,6 @@ class StreamPrefsTest {
             WsIn.Window("s", 1440, 3120, false, "monitor", 300),
             WsParser.parse("""{"type":"window","sessionId":"s","width":1440,"height":3120,"fitted":false,"mode":"monitor","dpi":300}"""),
         )
-        // a host without virtual monitors says window (or nothing at all)
         assertEquals(
             WsIn.Window("s", 812, 1760, true, "window", null),
             WsParser.parse("""{"type":"window","sessionId":"s","width":812,"height":1760,"fitted":true,"mode":"window"}"""),

@@ -14,6 +14,7 @@ import kotlinx.coroutines.launch
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.core.view.WindowInsetsCompat
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.darkColorScheme
@@ -38,7 +39,18 @@ class MainActivity : ComponentActivity() {
                 }
             }
         }
+        startService(Intent(this, TaskWatchService::class.java))
         handleDebugIntent(intent)
+    }
+
+    /**
+     * The activity is going away for good (finish, or the task was swiped away and the system destroys it): tell the PC
+     * to close every session now so its virtual monitors disappear at once. `shutdown` queues the close messages and
+     * the WebSocket goodbye on OkHttp's own threads, which run on after this returns.
+     */
+    override fun onDestroy() {
+        if (isFinishing) (application as PenlinkApp).disconnect()
+        super.onDestroy()
     }
 
     override fun onNewIntent(intent: Intent) {
@@ -65,25 +77,36 @@ class MainActivity : ComponentActivity() {
                 return@launch
             }
             val conn = app.connect(host)
-            // Optional overrides for scripted tests: --es quality fast --ei uiScale 250
+            // Optional overrides for scripted tests: --es quality sharp (= "Sharp text" on) --ei uiScale 250
             var prefs = app.store.streamPrefs(host.address).first()
             val q = intent.getStringExtra("quality")
             val ui = if (intent.hasExtra("uiScale")) intent.getIntExtra("uiScale", prefs.uiScale) else null
+            val (w, h) = windowPixels()
             if (q != null || ui != null) {
-                prefs = StreamPrefs(if (q != null) Quality.fromWire(q) else prefs.quality, ui?.let { StreamPrefs.snap(it) } ?: prefs.uiScale)
+                prefs = StreamPrefs(if (q != null) Quality.fromWire(q) == Quality.Sharp else prefs.sharpText, ui ?: prefs.uiScale).fitted(w, h)
                 app.store.setStreamPrefs(host.address, prefs)
             }
-            val (w, h) = windowPixels()
             val s = conn.open(AppEntry(appId, "debug app"), w, h, prefs)
             app.navigate(Screen.Session(s.localId))
         }
     }
 }
 
-/** Full window size in pixels (system bars included; the session screen is immersive). */
+/**
+ * The safe area in pixels: the window minus the display cutout and the system bars (as if they were shown,
+ * so the size does not change while the session screen hides them). This is what the PC renders for.
+ */
 fun Activity.windowPixels(): Pair<Int, Int> {
     val b = windowManager.currentWindowMetrics.bounds
-    return b.width() to b.height()
+    val root = window.decorView.rootWindowInsets ?: return b.width() to b.height()
+    val c = WindowInsetsCompat.toWindowInsetsCompat(root, window.decorView)
+    val bars = c.getInsetsIgnoringVisibility(WindowInsetsCompat.Type.systemBars())
+    val cut = c.getInsets(WindowInsetsCompat.Type.displayCutout())
+    val l = maxOf(bars.left, cut.left)
+    val r = maxOf(bars.right, cut.right)
+    val t = maxOf(bars.top, cut.top)
+    val bt = maxOf(bars.bottom, cut.bottom)
+    return (b.width() - l - r).coerceAtLeast(1) to (b.height() - t - bt).coerceAtLeast(1)
 }
 
 @Composable

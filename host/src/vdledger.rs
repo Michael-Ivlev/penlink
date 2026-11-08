@@ -78,6 +78,10 @@ pub struct Ledger {
 }
 
 pub fn default_path() -> PathBuf {
+    // A second host (tests next to a running one) must not clean up or list the other's monitors.
+    if let Some(p) = std::env::var_os("PENLINK_VD_LEDGER").filter(|p| !p.is_empty()) {
+        return PathBuf::from(p);
+    }
     let base = std::env::var_os("APPDATA").map(PathBuf::from).unwrap_or_else(std::env::temp_dir);
     base.join("Penlink").join("vdisplays.json")
 }

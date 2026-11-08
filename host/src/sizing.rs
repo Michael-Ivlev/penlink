@@ -7,10 +7,14 @@ use crate::geom::{clamp_video, even, Rect};
 // ---------------------------------------------------------------------------------------
 // Quality / UI scale
 
-/// `sharp`: the monitor has the phone's pixel size. `fast`: half of it (the video is upscaled
-/// on the phone: bigger UI, lighter stream).
+/// How the UI size is made.
+/// `fast` (low resolution, the default): the monitor is `width / uiScale` pixels wide at Windows
+/// DPI 100%, the phone upscales the video; fewer pixels also encode faster.
+/// `sharp` (sharp text): the monitor has the phone's pixel size and Windows DPI scaling does the
+/// UI size (Windows caps it: the smaller side divided by the scale stays at least 640 px).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Quality {
+    /// What a client that sends no `quality` (only the old `scale`) gets.
     #[default]
     Sharp,
     Fast,
@@ -33,9 +37,24 @@ impl Quality {
 }
 
 /// Default UI size in percent when a client sends `quality` but no `uiScale`.
-pub const DEFAULT_UI_SCALE: f64 = 300.0;
+pub const DEFAULT_UI_SCALE: f64 = 200.0;
 pub const MIN_UI_SCALE: f64 = 100.0;
-pub const MAX_UI_SCALE: f64 = 500.0;
+/// Upper limit of what is accepted on the wire; the real limit depends on the screen
+/// ([`max_ui_scale`]).
+pub const MAX_UI_SCALE: f64 = 800.0;
+/// Smallest side of a virtual monitor. Measured with SudoVDA on Windows 11: 200x433 and 520x240
+/// are accepted, 160x347 and 400x188 are not (the monitor never becomes active).
+pub const MIN_MONITOR_SIDE: u32 = 200;
+/// Smallest side the phone offers for real use (below it most apps no longer fit their minimum
+/// window size): a 1440 px wide phone gets 100..350 % (the test app already
+/// cannot be narrower than about 396 px).
+pub const USABLE_MONITOR_SIDE: u32 = 400;
+
+/// The largest UI size (percent) a `fast` monitor can have for a screen of `width` x `height`.
+/// `limit_side` is [`MIN_MONITOR_SIDE`] (what Windows accepts) or [`USABLE_MONITOR_SIDE`].
+pub fn max_ui_scale(width: u32, height: u32, limit_side: u32) -> f64 {
+    (width.min(height) as f64 * 100.0 / limit_side.max(1) as f64).max(MIN_UI_SCALE)
+}
 
 /// What the phone asked for (`open` / `resize`).
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -73,7 +92,7 @@ pub struct SizePlan {
     /// Video size = virtual monitor size (even, inside the encoder box).
     pub video_w: u32,
     pub video_h: u32,
-    /// DPI the monitor should get, in percent (sharp: the UI size; fast: half of it).
+    /// DPI the monitor should get, in percent (sharp: the UI size; fast: 100).
     pub dpi_pct: u32,
 }
 
@@ -88,7 +107,12 @@ impl SizePlan {
 pub fn plan_sizes(req: &SizeRequest) -> SizePlan {
     let (w, h, dpi) = match req.quality {
         Quality::Sharp => (req.width, req.height, req.ui_scale),
-        Quality::Fast => ((req.width + 1) / 2, (req.height + 1) / 2, req.ui_scale / 2.0),
+        Quality::Fast => {
+            // The factor is limited so that no side drops below what Windows accepts.
+            let f = req.ui_scale.min(max_ui_scale(req.width, req.height, MIN_MONITOR_SIDE)) / 100.0;
+            let side = |v: u32| ((v as f64 / f).round() as u32).max(MIN_MONITOR_SIDE);
+            (side(req.width), side(req.height), 100.0)
+        }
     };
     let (vw, vh) = clamp_video(w.max(2), h.max(2));
     SizePlan { video_w: vw, video_h: vh, dpi_pct: dpi.round().max(1.0) as u32 }
@@ -271,12 +295,30 @@ mod tests {
     }
 
     #[test]
-    fn fast_monitor_is_half_size_and_half_dpi() {
+    fn fast_monitor_is_phone_size_divided_by_ui_scale_at_dpi_100() {
         let p = plan_sizes(&req(1440, 3120, Quality::Fast, 300.0));
-        assert_eq!(p, SizePlan { video_w: 720, video_h: 1560, dpi_pct: 150 });
-        // odd sizes round up then to even
+        assert_eq!(p, SizePlan { video_w: 480, video_h: 1040, dpi_pct: 100 });
+        let p = plan_sizes(&req(1440, 3120, Quality::Fast, 200.0));
+        assert_eq!((p.video_w, p.video_h, p.dpi_pct), (720, 1560, 100));
+        // odd results become even; every 25 % step gives a different monitor
         let p = plan_sizes(&req(1281, 2857, Quality::Fast, 250.0));
-        assert_eq!((p.video_w, p.video_h, p.dpi_pct), (640, 1428, 125));
+        assert_eq!((p.video_w, p.video_h, p.dpi_pct), (512, 1142, 100));
+        let widths: Vec<u32> = (4..=16).map(|i| plan_sizes(&req(1440, 3120, Quality::Fast, i as f64 * 25.0)).video_w).collect();
+        assert!(widths.windows(2).all(|w| w[0] > w[1]), "{widths:?}");
+        assert_eq!(widths.first(), Some(&1440));
+        assert_eq!(widths.last(), Some(&360));
+    }
+
+    #[test]
+    fn fast_never_goes_below_what_windows_accepts() {
+        // 700 % of a 1440 px side would be 205: fine; 800 % is 180: held at 200 px
+        let p = plan_sizes(&req(1440, 3120, Quality::Fast, 800.0));
+        assert_eq!(p.video_w, 200);
+        // a short keyboard-sized area keeps its aspect as far as possible and stays >= 200
+        let p = plan_sizes(&req(3120, 500, Quality::Fast, 400.0));
+        assert!(p.video_w >= 200 && p.video_h >= 200, "{p:?}");
+        assert!((max_ui_scale(1440, 3120, USABLE_MONITOR_SIDE) - 360.0).abs() < 1e-9);
+        assert!((max_ui_scale(1440, 3120, MIN_MONITOR_SIDE) - 720.0).abs() < 1e-9);
     }
 
     #[test]
@@ -290,7 +332,7 @@ mod tests {
 
     #[test]
     fn window_scale_matches_the_monitor_case() {
-        // sharp: client = 1440/3.0 ; fast: client = 720 / 1.5 = same window
+        // sharp: client = 1440/3.0 ; fast: monitor 480x1040 at 100 % = same window
         let s = plan_sizes(&req(1440, 3120, Quality::Sharp, 300.0));
         let f = plan_sizes(&req(1440, 3120, Quality::Fast, 300.0));
         let cs = crate::geom::client_size_for(s.video_w, s.video_h, s.window_scale());
@@ -306,7 +348,7 @@ mod tests {
         let r = SizeRequest::from_wire(1440, 3120, 2.0, Some("fast"), Some(275.0));
         assert_eq!((r.quality, r.ui_scale), (Quality::Fast, 275.0));
         // out of range / junk is clamped or ignored
-        assert_eq!(SizeRequest::from_wire(1, 1, 1.0, Some("weird"), Some(9000.0)).ui_scale, 500.0);
+        assert_eq!(SizeRequest::from_wire(1, 1, 1.0, Some("weird"), Some(9000.0)).ui_scale, 800.0);
         assert_eq!(SizeRequest::from_wire(1, 1, 1.0, Some("weird"), Some(9000.0)).quality, Quality::Sharp);
         assert_eq!(SizeRequest::from_wire(1, 1, f64::NAN, None, None).ui_scale, 100.0);
         assert_eq!(SizeRequest::from_wire(1, 1, 1.0, None, Some(10.0)).ui_scale, 100.0);
@@ -414,8 +456,8 @@ mod tests {
         assert_eq!(decide_resize(cur, &plan(3120, 1440, 300)), ResizeAction::Reconfigure { w: 3120, h: 1440 });
         // taller than the monitor
         assert_eq!(decide_resize(cur, &plan(1440, 3200, 300)), ResizeAction::Reconfigure { w: 1440, h: 3200 });
-        // sharp -> fast
-        assert_eq!(decide_resize(cur, &plan(720, 1560, 150)), ResizeAction::Reconfigure { w: 720, h: 1560 });
+        // sharp -> fast (low resolution)
+        assert_eq!(decide_resize(cur, &plan(720, 1560, 100)), ResizeAction::Reconfigure { w: 720, h: 1560 });
     }
 
     fn ad(name: &str, software: bool) -> AdapterInfo {

@@ -60,11 +60,14 @@ import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
 import dev.penlink.PenlinkApp
-import dev.penlink.data.Quality
 import dev.penlink.data.StreamPrefs
 import kotlin.math.roundToInt
 import dev.penlink.Screen
 import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.displayCutout
+import androidx.compose.foundation.layout.systemBarsIgnoringVisibility
+import androidx.compose.material3.Switch
+import androidx.compose.ui.platform.LocalLayoutDirection
 import androidx.compose.foundation.layout.ime
 import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.runtime.rememberUpdatedState
@@ -96,7 +99,7 @@ fun fittedHint(videoWidth: Int, windowWidth: Int): String {
     return "PC screen too small for this size: the picture is upscaled %.1fx and looks soft. Raise the UI scale until this message goes away.".format(up)
 }
 
-@OptIn(ExperimentalMaterial3Api::class)
+@OptIn(ExperimentalMaterial3Api::class, androidx.compose.foundation.layout.ExperimentalLayoutApi::class)
 @Composable
 fun SessionScreen(app: PenlinkApp, conn: HostConnection, selectedId: Long) {
     val activity = LocalActivity.current
@@ -110,7 +113,8 @@ fun SessionScreen(app: PenlinkApp, conn: HostConnection, selectedId: Long) {
         val window = activity?.window
         val controller = window?.let { WindowInsetsControllerCompat(it, view) }
         if (window != null) WindowCompat.setDecorFitsSystemWindows(window, false)
-        // Draw under the camera hole too (both orientations): the video fills the whole display.
+        // The window may extend into the cutout (the unsafe strips are painted black); the video itself
+        // sits inside the safe area, see safeL..safeB below.
         val oldCutout = window?.attributes?.layoutInDisplayCutoutMode
         window?.let {
             val a = it.attributes
@@ -143,6 +147,15 @@ fun SessionScreen(app: PenlinkApp, conn: HostConnection, selectedId: Long) {
     val imePx = WindowInsets.ime.getBottom(density)
     val imeVisible = imePx > 0
     val reservePx = if (imeVisible) imePx + with(density) { ExtraKeysHeight.roundToPx() } else 0
+
+    // Safe area: display cutout and system bars (as if shown, so it does not jump when the bars are hidden).
+    val ld = LocalLayoutDirection.current
+    val cutout = WindowInsets.displayCutout
+    val bars = WindowInsets.systemBarsIgnoringVisibility
+    val safeL = maxOf(cutout.getLeft(density, ld), bars.getLeft(density, ld))
+    val safeR = maxOf(cutout.getRight(density, ld), bars.getRight(density, ld))
+    val safeT = maxOf(cutout.getTop(density), bars.getTop(density))
+    val safeB = maxOf(cutout.getBottom(density), bars.getBottom(density))
 
     if (current == null) {
         LaunchedEffect(Unit) { app.navigate(Screen.Apps) }
@@ -199,7 +212,13 @@ fun SessionScreen(app: PenlinkApp, conn: HostConnection, selectedId: Long) {
         // Video + input, recreated per tab so each keeps its own renderer and zoom. It only
         // occupies the area above the keyboard; the PC window is resized to match.
         Box(
-            Modifier.fillMaxSize().padding(bottom = with(density) { reservePx.toDp() })
+            Modifier.fillMaxSize().padding(
+                start = with(density) { safeL.toDp() },
+                end = with(density) { safeR.toDp() },
+                top = with(density) { safeT.toDp() },
+                // the IME insets already include the navigation bar
+                bottom = with(density) { maxOf(safeB, reservePx).toDp() },
+            )
                 .onSizeChanged { areaPx = it.width to it.height },
         ) {
         androidx.compose.runtime.key(current.localId) {
@@ -309,7 +328,8 @@ fun SessionScreen(app: PenlinkApp, conn: HostConnection, selectedId: Long) {
         // Tab strip (auto-hide).
         if (stripVisible) {
             Row(
-                Modifier.fillMaxWidth().background(Color(0xE61E1E2E)).padding(horizontal = 4.dp, vertical = 2.dp),
+                Modifier.fillMaxWidth().padding(top = with(density) { safeT.toDp() }, start = with(density) { safeL.toDp() }, end = with(density) { safeR.toDp() })
+                    .background(Color(0xE61E1E2E)).padding(horizontal = 4.dp, vertical = 2.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 IconButton(onClick = { app.navigate(Screen.Apps) }) {
@@ -382,7 +402,7 @@ fun SessionScreen(app: PenlinkApp, conn: HostConnection, selectedId: Long) {
         } else {
             // Small handle to bring the strip back.
             Box(
-                Modifier.align(Alignment.TopCenter).padding(top = 2.dp)
+                Modifier.align(Alignment.TopCenter).padding(top = with(density) { safeT.toDp() } + 2.dp)
                     .clip(RoundedCornerShape(50)).background(Color(0x66FFFFFF))
                     .clickable { stripVisible = true }
                     .size(width = 56.dp, height = 12.dp),
@@ -395,80 +415,82 @@ fun SessionScreen(app: PenlinkApp, conn: HostConnection, selectedId: Long) {
             ExtraKeysRow(
                 logic = keyLogic,
                 onKeys = { sendKeys(it) },
-                modifier = Modifier.align(Alignment.BottomCenter).windowInsetsPadding(WindowInsets.ime),
+                modifier = Modifier.align(Alignment.BottomCenter).windowInsetsPadding(WindowInsets.ime)
+                    .padding(start = with(density) { safeL.toDp() }, end = with(density) { safeR.toDp() }),
             )
         }
     }
 
     if (showSettings) {
-        SettingsSheet(app, conn, current, onDismiss = { showSettings = false })
+        SettingsSheet(app, conn, current, activity?.windowPixels() ?: areaPx, onDismiss = { showSettings = false })
     }
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun SettingsSheet(app: PenlinkApp, conn: HostConnection, session: RemoteSession, onDismiss: () -> Unit) {
+private fun SettingsSheet(app: PenlinkApp, conn: HostConnection, session: RemoteSession, screen: Pair<Int, Int>, onDismiss: () -> Unit) {
     val scope = rememberCoroutineScope()
     val prefs by session.prefs.collectAsState()
-    var quality by remember { mutableStateOf(prefs.quality) }
-    var step by remember { mutableStateOf(StreamPrefs.UI_STEPS.indexOf(prefs.uiScale).coerceAtLeast(0).toFloat()) }
+    val (sw, sh) = screen
+    var sharp by remember { mutableStateOf(prefs.sharpText) }
+    val steps = StreamPrefs.steps(sharp, sw, sh)
+    var step by remember { mutableStateOf(steps.indexOf(StreamPrefs.snap(prefs.uiScale, steps)).toFloat()) }
 
-    fun apply(q: Quality, stepIndex: Int) {
-        val p = StreamPrefs(q, StreamPrefs.UI_STEPS[stepIndex])
+    fun apply(p: StreamPrefs) {
         session.setPrefs(p)
         scope.launch { app.store.setStreamPrefs(conn.host.address, p) }
     }
 
     ModalBottomSheet(onDismissRequest = onDismiss) {
         Column(Modifier.padding(horizontal = 24.dp, vertical = 8.dp).padding(bottom = 24.dp)) {
-            Text("Quality", style = MaterialTheme.typography.titleMedium)
-            Row(Modifier.padding(top = 4.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                for (q in Quality.entries) {
-                    FilterChip(
-                        selected = quality == q,
-                        onClick = {
-                            quality = q
-                            apply(q, step.roundToInt())
-                        },
-                        label = { Text(q.label) },
-                    )
-                }
-            }
+            val uiPercent = steps[step.roundToInt().coerceIn(0, steps.size - 1)]
+            Text("UI size: $uiPercent%", style = MaterialTheme.typography.titleMedium)
             Text(
-                if (quality == Quality.Sharp) "Full phone resolution: crisp text."
-                else "Half resolution, upscaled here: bigger UI, lighter stream.",
-                style = MaterialTheme.typography.bodySmall,
-            )
-
-            val uiPercent = StreamPrefs.UI_STEPS[step.roundToInt()]
-            Text("UI size: $uiPercent%", style = MaterialTheme.typography.titleMedium, modifier = Modifier.padding(top = 16.dp))
-            Text(
-                "How big text and buttons are on the PC. Higher = bigger.",
+                if (sharp) "Windows scales text and buttons. Windows allows at most ${steps.last()}% on this screen."
+                else "The PC draws at lower resolution and this phone enlarges it. Up to ${steps.last()}% on this screen.",
                 style = MaterialTheme.typography.bodySmall,
             )
             Slider(
                 value = step,
                 onValueChange = { step = it },
-                valueRange = 0f..(StreamPrefs.UI_STEPS.size - 1).toFloat(),
-                steps = StreamPrefs.UI_STEPS.size - 2,
-                onValueChangeFinished = { apply(quality, step.roundToInt()) },
+                valueRange = 0f..(steps.size - 1).toFloat(),
+                steps = (steps.size - 2).coerceAtLeast(0),
+                onValueChangeFinished = { apply(StreamPrefs(sharp, uiPercent)) },
             )
+            Row(Modifier.fillMaxWidth().padding(top = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+                Column(Modifier.weight(1f)) {
+                    Text("Sharp text", style = MaterialTheme.typography.titleMedium)
+                    Text(
+                        if (sharp) "Full phone resolution: crisp text, but the UI cannot get as big and more pixels are sent."
+                        else "Off: fewer pixels, faster, text is a little soft when enlarged.",
+                        style = MaterialTheme.typography.bodySmall,
+                    )
+                }
+                Switch(checked = sharp, onCheckedChange = { on ->
+                    sharp = on
+                    val p = StreamPrefs(on, uiPercent).fitted(sw, sh)
+                    val newSteps = StreamPrefs.steps(on, sw, sh)
+                    step = newSteps.indexOf(p.uiScale).toFloat()
+                    apply(p)
+                })
+            }
 
             val win by session.windowSize.collectAsState()
             val size by session.requestedSize.collectAsState()
             val w = win
-            Text("Showing", style = MaterialTheme.typography.titleMedium, modifier = Modifier.padding(top = 8.dp))
+            Text("Showing", style = MaterialTheme.typography.titleMedium, modifier = Modifier.padding(top = 16.dp))
             when {
                 w == null -> Text("Waiting for the PC...", style = MaterialTheme.typography.bodyMedium)
                 w.isMonitor -> {
                     Text("Virtual monitor: ${w.width} x ${w.height} px", style = MaterialTheme.typography.bodyMedium)
-                    val asked = StreamPrefs.dpiAsked(StreamPrefs(quality, uiPercent))
                     val dpi = w.dpi
-                    if (dpi != null) {
-                        Text(
-                            if (dpi == asked) "Windows DPI: $dpi%" else "Windows DPI: $dpi% (asked $asked%, the nearest step Windows allows)",
-                            style = MaterialTheme.typography.bodyMedium,
-                        )
+                    val up = if (w.width > 0) size.first.toDouble() / w.width else 1.0
+                    Text(
+                        "Windows DPI ${dpi ?: 100}%%, enlarged %.2fx here = UI size about %d%%".format(up, ((dpi ?: 100) * up).roundToInt()),
+                        style = MaterialTheme.typography.bodyMedium,
+                    )
+                    if (dpi != null && sharp && dpi != uiPercent) {
+                        Text("Windows used the nearest DPI step it allows ($dpi%, asked $uiPercent%).", style = MaterialTheme.typography.bodySmall)
                     }
                 }
                 else -> {
@@ -488,7 +510,7 @@ private fun SettingsSheet(app: PenlinkApp, conn: HostConnection, session: Remote
                     }
                 }
             }
-            Text("Video: ${size.first} x ${size.second} px requested", style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(top = 4.dp))
+            Text("Phone area: ${size.first} x ${size.second} px", style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(top = 4.dp))
         }
     }
 }

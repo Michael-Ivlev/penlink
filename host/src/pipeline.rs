@@ -46,7 +46,7 @@ const IDLE_RESEND: Duration = Duration::from_millis(450); // >= ~2 fps even when
 pub enum CaptureSource {
     Window(Hwnd),
     /// A whole (virtual) monitor. `watch` is the app window: when it is gone the session ends.
-    Monitor { hmonitor: isize, watch: Hwnd },
+    Monitor { hmonitor: isize, rect: crate::geom::Rect, watch: Hwnd },
 }
 
 impl CaptureSource {
@@ -193,7 +193,26 @@ fn run(
     let interop = factory::<GraphicsCaptureItem, IGraphicsCaptureItemInterop>()?;
     let item: GraphicsCaptureItem = match target {
         CaptureSource::Window(h) => unsafe { interop.CreateForWindow(hwnd(h))? },
-        CaptureSource::Monitor { hmonitor, .. } => unsafe { interop.CreateForMonitor(HMONITOR(hmonitor as *mut std::ffi::c_void))? },
+        CaptureSource::Monitor { hmonitor, rect, .. } => {
+            // Windows may still be settling a monitor that just changed its mode: the handle
+            // can be stale for a moment. Look the monitor up again by its rectangle and retry.
+            let mut h = hmonitor;
+            let mut tries = 0;
+            loop {
+                match unsafe { interop.CreateForMonitor(HMONITOR(h as *mut std::ffi::c_void)) } {
+                    Ok(i) => break i,
+                    Err(e) if tries < 15 => {
+                        tries += 1;
+                        tracing::debug!("capture of monitor handle {h:#x} failed ({e}), retry {tries}");
+                        std::thread::sleep(Duration::from_millis(150));
+                        if let Some(m) = crate::vdisplay::enum_monitors().into_iter().find(|m| m.rect == rect) {
+                            h = m.hmonitor;
+                        }
+                    }
+                    Err(e) => return Err(e.into()),
+                }
+            }
+        }
     };
     let watched = target.watched_window();
     let mut pool_size = item.Size()?;

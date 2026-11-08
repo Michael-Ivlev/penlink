@@ -131,7 +131,14 @@ class HostConnection(
         }
         _sessions.value.forEach { it.close() }
         _sessions.value = emptyList()
+        // `close` frames for every tab, then the goodbye: the host removes its virtual monitors on these.
+        // Give OkHttp's writer thread a moment to put them on the wire (the process may be about to die).
         socket?.close(1000, "bye")
+        var waited = 0
+        while (socket != null && socket.queueSize() > 0 && waited < 400) {
+            Thread.sleep(10)
+            waited += 10
+        }
         scope.cancel()
     }
 

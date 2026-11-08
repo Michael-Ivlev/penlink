@@ -30,6 +30,10 @@ use webrtc::ice_transport::ice_candidate::RTCIceCandidateInit;
 
 const LAUNCH_TIMEOUT: Duration = Duration::from_secs(15);
 const CATALOG_TTL: Duration = Duration::from_secs(30);
+/// WebSocket keep-alive: ping interval, and how long the phone may stay silent (pongs count)
+/// before it is treated as gone.
+const PING_EVERY: Duration = Duration::from_secs(4);
+const IDLE_TIMEOUT: Duration = Duration::from_secs(12);
 
 #[derive(Debug, Clone)]
 pub struct Config {
@@ -76,6 +80,9 @@ pub struct AppState {
     icons: Mutex<HashMap<String, Vec<u8>>>,
     /// Virtual monitors; `None` when the driver is not installed (window capture is used).
     vd: Option<Arc<VdManager>>,
+    /// The session lists of the live WebSockets, so a phone that comes back after a network change
+    /// can take over what its old (not yet noticed as dead) connection still holds.
+    conns: std::sync::Mutex<Vec<std::sync::Weak<ConnSessions>>>,
 }
 
 impl AppState {
@@ -200,12 +207,13 @@ pub async fn start(cfg: Config) -> Result<RunningServer> {
         catalog: Mutex::new(Catalog { apps: Vec::new(), at: None }),
         icons: Mutex::new(HashMap::new()),
         vd: vd.clone(),
+        conns: std::sync::Mutex::new(Vec::new()),
     });
     // Monitors kept for a phone that never came back are removed after their grace period.
     let reaper = vd.map(|vd| {
         tokio::spawn(async move {
             loop {
-                tokio::time::sleep(Duration::from_secs(5)).await;
+                tokio::time::sleep(Duration::from_millis(500)).await;
                 let vd = vd.clone();
                 let _ = tokio::task::spawn_blocking(move || vd.reap(Instant::now())).await;
             }
@@ -391,20 +399,48 @@ async fn ws_loop(socket: WebSocket, st: Arc<AppState>) {
     let (mut sink, mut stream) = socket.split();
     let (out_tx, mut out_rx) = unbounded_channel::<ServerMsg>();
     let writer = tokio::spawn(async move {
-        while let Some(m) = out_rx.recv().await {
-            let Ok(s) = serde_json::to_string(&m) else { continue };
-            if sink.send(Message::Text(s.into())).await.is_err() {
-                break;
+        // A ping every few seconds: a phone that vanished (network gone, no goodbye) answers
+        // nothing and is noticed by the reader's idle timeout.
+        let mut ping = tokio::time::interval(PING_EVERY);
+        loop {
+            tokio::select! {
+                m = out_rx.recv() => {
+                    let Some(m) = m else { break };
+                    let Ok(s) = serde_json::to_string(&m) else { continue };
+                    if sink.send(Message::Text(s.into())).await.is_err() {
+                        break;
+                    }
+                }
+                _ = ping.tick() => {
+                    if sink.send(Message::Ping(Vec::new().into())).await.is_err() {
+                        break;
+                    }
+                }
             }
         }
         let _ = sink.close().await;
     });
     let sessions: Sessions = Arc::new(ConnSessions::default());
+    st.conns.lock().unwrap().push(Arc::downgrade(&sessions));
 
-    while let Some(Ok(msg)) = stream.next().await {
+    // How the phone left: a close frame = it meant to leave (tabs closed, app swiped away);
+    // anything else = the link broke, the monitors get a short grace period.
+    let mut goodbye = false;
+    loop {
+        let msg = match tokio::time::timeout(IDLE_TIMEOUT, stream.next()).await {
+            Ok(Some(Ok(m))) => m,
+            Ok(_) => break,
+            Err(_) => {
+                tracing::info!("phone silent for {} s: treating the connection as dropped", IDLE_TIMEOUT.as_secs());
+                break;
+            }
+        };
         let text = match msg {
             Message::Text(t) => t.to_string(),
-            Message::Close(_) => break,
+            Message::Close(_) => {
+                goodbye = true;
+                break;
+            }
             _ => continue,
         };
         let cm: ClientMsg = match serde_json::from_str(&text) {
@@ -469,8 +505,12 @@ async fn ws_loop(socket: WebSocket, st: Arc<AppState>) {
             ClientMsg::Close { session_id } => {
                 let s = sessions.ready.lock().await.remove(&session_id);
                 if let Some(s) = s {
-                    s.close().await;
-                    let _ = out_tx.send(ServerMsg::Closed { session_id, reason: "closed".into() });
+                    // Not awaited here: the next messages must not wait for the monitor to go.
+                    let out_tx = out_tx.clone();
+                    tokio::spawn(async move {
+                        s.close().await;
+                        let _ = out_tx.send(ServerMsg::Closed { session_id, reason: "closed".into() });
+                    });
                 } else if sessions.pending.lock().await.remove(&session_id) {
                     // Still launching: do_open notices the missing entry and cleans up.
                     let _ = out_tx.send(ServerMsg::Closed { session_id, reason: "closed".into() });
@@ -481,12 +521,16 @@ async fn ws_loop(socket: WebSocket, st: Arc<AppState>) {
         }
     }
 
-    // Phone went away: stop every session (apps stay open). Virtual monitors stay for the
-    // grace period so the phone can come back and attach to them.
+    // Phone went away: stop every session (apps stay open). After a goodbye the virtual
+    // monitors go at once; after a broken link they stay for the (short) grace period so a
+    // phone that is back within seconds can attach to them.
     sessions.pending.lock().await.clear();
     let all: Vec<Arc<Session>> = sessions.ready.lock().await.drain().map(|(_, s)| s).collect();
-    for s in all {
-        s.close_with(CloseKind::PhoneGone).await;
+    let kind = if goodbye { CloseKind::Closed } else { CloseKind::PhoneGone };
+    tracing::info!("phone left ({}), closing {} session(s)", if goodbye { "goodbye" } else { "link broke" }, all.len());
+    let tasks: Vec<_> = all.into_iter().map(|s| tokio::spawn(async move { s.close_with(kind).await })).collect();
+    for t in tasks {
+        let _ = t.await;
     }
     drop(out_tx);
     let _ = writer.await;
@@ -610,6 +654,28 @@ async fn do_open(
         req.ui_scale,
         vd.is_some()
     );
+
+    // A re-attaching phone has lost its old connection, which the host may not know yet (a silent
+    // network change): end that connection's session for this app now, as if it had dropped, so
+    // its monitor is kept for a moment and taken over here instead of waiting for the timeout.
+    if attach {
+        let others: Vec<Sessions> = {
+            let mut l = st.conns.lock().unwrap();
+            l.retain(|w| w.strong_count() > 0);
+            l.iter().filter_map(|w| w.upgrade()).filter(|c| !Arc::ptr_eq(c, &sessions)).collect()
+        };
+        for c in others {
+            let stale: Vec<Arc<Session>> = {
+                let mut ready = c.ready.lock().await;
+                let ids: Vec<String> = ready.iter().filter(|(_, s)| s.app_id == app_id).map(|(k, _)| k.clone()).collect();
+                ids.iter().filter_map(|k| ready.remove(k)).collect()
+            };
+            for s in stale {
+                tracing::info!("session {} belongs to a connection the phone left: handing its app to the new one", s.id);
+                s.close_with(CloseKind::PhoneGone).await;
+            }
+        }
+    }
 
     // A new app gets its monitor first, so the window can be moved there as soon as it
     // appears. A reattach looks for the window first (a kept monitor is found through it).

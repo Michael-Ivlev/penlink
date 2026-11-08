@@ -185,7 +185,7 @@ impl Session {
                 mode: StreamMode::Monitor,
                 dpi: Some(mon.dpi_actual),
             };
-            source = CaptureSource::Monitor { hmonitor: mon.hmonitor, watch: hwnd };
+            source = CaptureSource::Monitor { hmonitor: mon.hmonitor, rect: mon.rect, watch: hwnd };
             let spec = MonitorSpec { w: mon.rect.w as u32, h: mon.rect.h as u32, dpi_wanted: mon.dpi_wanted };
             monitor_session = Some(MonitorSession {
                 mgr,
@@ -497,7 +497,7 @@ impl Session {
         };
         *ms.state.lock().unwrap() = MonState { mon, spec, view_h, work };
         if matches!(action, ResizeAction::Reconfigure { .. }) {
-            self.start_pipeline(CaptureSource::Monitor { hmonitor, watch: hwnd });
+            self.start_pipeline(CaptureSource::Monitor { hmonitor, rect: monitor_rect, watch: hwnd });
         }
         self.request_keyframe();
         Ok(report)
@@ -592,34 +592,46 @@ impl Session {
         self.close_with(CloseKind::Closed).await;
     }
 
-    /// Like [`close`](Self::close); `PhoneGone` keeps a virtual monitor for the grace period.
+    /// Like [`close`](Self::close); `PhoneGone` keeps a virtual monitor for [`GRACE`].
+    ///
+    /// Order matters for speed: the capture stops first (it watches the monitor), then the
+    /// monitor goes at once; the slow parts (input thread, peer connection) come after.
     pub async fn close_with(&self, kind: CloseKind) {
         if self.closed.swap(true, Ordering::SeqCst) {
             return;
         }
+        let t0 = Instant::now();
         let _ = self.input_tx.send(InputCmd::Stop);
         let pipeline = self.pipeline.lock().unwrap().take();
-        let input_thread = self.input_thread.lock().unwrap().take();
-        let _ = tokio::task::spawn_blocking(move || {
-            drop(pipeline); // joins the capture thread
-            if let Some(t) = input_thread {
-                let _ = t.join();
-            }
-        })
-        .await;
-        let _ = self.pc.close().await;
+        let _ = tokio::task::spawn_blocking(move || drop(pipeline)).await; // joins the capture thread
+        let t_capture = t0.elapsed();
         if let Some(ms) = &self.monitor {
             let guid = ms.state.lock().unwrap().mon.guid;
             let mgr = ms.mgr.clone();
             let hwnd = self.hwnd;
             let _ = tokio::task::spawn_blocking(move || match kind {
-                CloseKind::PhoneGone if winutil::is_window(hwnd) => mgr.orphan(&guid, std::time::Instant::now(), GRACE),
+                CloseKind::PhoneGone if winutil::is_window(hwnd) => mgr.orphan(&guid, Instant::now(), GRACE),
                 _ => mgr.release(&guid),
             })
             .await;
         }
+        let t_monitor = t0.elapsed();
+        let input_thread = self.input_thread.lock().unwrap().take();
+        let _ = tokio::task::spawn_blocking(move || {
+            if let Some(t) = input_thread {
+                let _ = t.join();
+            }
+        })
+        .await;
         // Capture and input threads are gone: the window may be opened again.
         self.claim.lock().unwrap().take();
+        // The phone is gone or does not care: closing the peer connection (DTLS goodbye) may
+        // take a while and must not hold anything up.
+        let pc = self.pc.clone();
+        tokio::spawn(async move {
+            let _ = pc.close().await;
+        });
+        tracing::info!("session {} closed ({kind:?}): capture stopped after {:?}, monitor handled after {:?}, total {:?}", self.id, t_capture, t_monitor, t0.elapsed());
     }
 
     /// Whether this session streams a virtual monitor.

@@ -11,9 +11,10 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-/// How long a monitor is kept after the phone's WebSocket dropped, so it can reconnect and
-/// attach to it. After that the monitor is removed and the app window goes back to the PC.
-pub const GRACE: Duration = Duration::from_secs(120);
+/// How long a monitor is kept after the phone's WebSocket dropped without a goodbye, so a short
+/// network blip can attach to it again. After that the monitor is removed and the app window goes
+/// back to the PC (a phone that comes back later gets a new monitor).
+pub const GRACE: Duration = Duration::from_secs(5);
 pub const REFRESH_RATE: u32 = 60;
 
 /// A virtual monitor as it is now.
@@ -71,6 +72,8 @@ struct Lease {
 struct Inner {
     ledger: Ledger,
     leases: HashMap<Guid, Lease>,
+    /// Monitors whose removal failed; [`VdManager::reap`] tries again.
+    stuck: Vec<(Guid, String, u32)>,
 }
 
 pub struct VdManager {
@@ -80,7 +83,7 @@ pub struct VdManager {
 
 impl VdManager {
     pub fn new(backend: Arc<dyn Backend>, ledger: Ledger) -> Arc<VdManager> {
-        Arc::new(VdManager { backend, inner: Mutex::new(Inner { ledger, leases: HashMap::new() }) })
+        Arc::new(VdManager { backend, inner: Mutex::new(Inner { ledger, leases: HashMap::new(), stuck: Vec::new() }) })
     }
 
     /// Remove every monitor an earlier run of the host left behind (the ledger lists them).
@@ -150,7 +153,18 @@ impl VdManager {
                 100
             }
         };
-        let (hmonitor, rect) = self.backend.refresh(&gdi).map_err(|e| (e, Some(gdi.clone())))?;
+        let (mut hmonitor, mut rect) = self.backend.refresh(&gdi).map_err(|e| (e, Some(gdi.clone())))?;
+        // A mode switch needs a moment to reach the desktop: wait until the rectangle is the asked size.
+        for _ in 0..20 {
+            if rect.w == width as i32 && rect.h == height as i32 {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+            if let Ok((h, r)) = self.backend.refresh(&gdi) {
+                hmonitor = h;
+                rect = r;
+            }
+        }
         Ok(VMonitor { guid: *guid, gdi_name: gdi, hmonitor, rect, dpi_wanted, dpi_actual })
     }
 
@@ -239,7 +253,10 @@ impl VdManager {
     fn remove_lease(&self, g: &mut Inner, guid: &Guid, lease: &Lease) {
         match self.backend.remove(guid, Some(&lease.mon.gdi_name)) {
             Ok(()) => g.ledger.remove(guid),
-            Err(e) => tracing::warn!("could not remove virtual monitor {}: {e}", lease.mon.gdi_name),
+            Err(e) => {
+                tracing::warn!("could not remove virtual monitor {}: {e}; will retry", lease.mon.gdi_name);
+                g.stuck.push((*guid, lease.mon.gdi_name.clone(), 1));
+            }
         }
     }
 
@@ -272,6 +289,20 @@ impl VdManager {
             .collect();
         for guid in &due {
             self.release_locked(&mut g, guid);
+        }
+        let stuck = std::mem::take(&mut g.stuck);
+        for (guid, gdi, tries) in stuck {
+            match self.backend.remove(&guid, Some(&gdi)) {
+                Ok(()) => {
+                    tracing::info!("virtual monitor {gdi} removed on retry {tries}");
+                    g.ledger.remove(&guid);
+                }
+                Err(e) if tries < 20 => {
+                    tracing::debug!("retry {tries} to remove {gdi} failed: {e}");
+                    g.stuck.push((guid, gdi, tries + 1));
+                }
+                Err(e) => tracing::warn!("giving up removing virtual monitor {gdi}: {e}"),
+            }
         }
         due
     }
@@ -497,14 +528,14 @@ mod tests {
         m.orphan(&a.guid, t0, GRACE);
         m.orphan(&b.guid, t0, GRACE);
         // nothing is due yet
-        assert!(m.reap(t0 + Duration::from_secs(119)).is_empty());
+        assert!(m.reap(t0 + GRACE - Duration::from_secs(1)).is_empty());
         // the phone is back for appA only
         let back = m.adopt(100).unwrap();
         assert_eq!(back.guid, a.guid);
         assert!(m.adopt(100).is_none(), "an adopted monitor is active again");
         assert!(m.adopt(999).is_none());
         // time passes: appB's monitor goes, appA's stays
-        let gone = m.reap(t0 + Duration::from_secs(121));
+        let gone = m.reap(t0 + GRACE + Duration::from_secs(1));
         assert_eq!(gone, vec![b.guid]);
         assert_eq!(m.count(), 1);
         assert!(m.get(&a.guid).is_some());

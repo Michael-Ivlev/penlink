@@ -33,8 +33,17 @@ Strip buttons: new app, tabs (x closes), direct/trackpad mode, reset zoom, UI sc
 - Finger, direct mode: touch; long press = right click; two-finger drag = wheel; pinch = local zoom.
 - Finger, trackpad mode: drag moves the cursor, tap = click, two-finger tap = right click,
   tap then drag = left-button drag, two-finger drag = wheel.
-- Keyboard: Penlink's coding keyboard (modifiers: tap = next key, double tap = locked). "ABC" key at the
-  right switches to the phone's normal keyboard, whose text goes out as `text` messages.
+- Keyboard: the keyboard button in the strip shows/hides the phone's own keyboard; its text goes out as `text`
+  (Backspace/Enter/Tab/Delete as keys). A row of extra keys sits on top of it: Fn (F1-F12), Esc, Tab,
+  Ctrl/Alt/Shift/Win (tap = next key, tap again = locked, tap again = off), arrows, Home, End, PgUp, PgDn, Del;
+  scroll the row sideways if it does not fit. With a modifier on, typed characters become real key combos
+  (Hebrew letters map to the key at the same position on the Hebrew layout, so Ctrl+ב = Ctrl+C).
+  While the keyboard is up the video only fills the area above it and the PC window is resized to that area.
+- If the connection drops (host restart, network) the tabs show "Reconnecting" and come back by themselves
+  (apps are re-attached, not relaunched; tabs whose app has exited are removed). After 30 s a message with
+  a Retry button appears.
+- Settings sheet: UI scale. If the PC screen is too small for the requested window size the sheet says so
+  (the picture is then upscaled and looks soft; a higher UI scale makes the PC window smaller, so it fits).
 
 ## Debug: open a raw appId
 

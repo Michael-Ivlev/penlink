@@ -120,6 +120,9 @@ class KeyboardLogic {
 
     fun state(m: KeyMod): ModState = states.getValue(m)
 
+    /** Some modifier is down (sticky or locked): typed characters must go out as key combos. */
+    fun anyActive(): Boolean = states.values.any { it != ModState.Off }
+
     fun tapModifier(m: KeyMod): List<KeyAction> {
         val prev = states.getValue(m)
         val next = when (prev) {

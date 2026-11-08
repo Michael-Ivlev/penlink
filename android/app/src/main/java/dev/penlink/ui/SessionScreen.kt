@@ -58,6 +58,16 @@ import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
 import dev.penlink.PenlinkApp
 import dev.penlink.Screen
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.ime
+import androidx.compose.foundation.layout.windowInsetsPadding
+import androidx.compose.runtime.rememberUpdatedState
+import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.platform.LocalDensity
+import dev.penlink.input.ImeMapping
+import dev.penlink.input.ImePiece
+import dev.penlink.input.KeyDef
+import dev.penlink.rtc.LinkState
 import dev.penlink.input.ImeCaptureView
 import dev.penlink.input.InputOverlayView
 import dev.penlink.input.KeyAction
@@ -71,6 +81,14 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import org.webrtc.RendererCommon
 import org.webrtc.SurfaceViewRenderer
+
+private const val RESIZE_DEBOUNCE_MS = 250L
+
+/** Hint shown in the settings sheet when the PC had to shrink the window to fit its screen. */
+fun fittedHint(videoWidth: Int, windowWidth: Int): String {
+    val up = if (windowWidth > 0) videoWidth.toDouble() / windowWidth else 1.0
+    return "PC screen too small for this size: the picture is upscaled %.1fx and looks soft. Raise the UI scale until this message goes away.".format(up)
+}
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -91,11 +109,20 @@ fun SessionScreen(app: PenlinkApp, conn: HostConnection, selectedId: Long) {
         onDispose { controller?.show(WindowInsetsCompat.Type.systemBars()) }
     }
 
-    // Rotation (or any window size change): tell the host about every open session.
-    val config = LocalConfiguration.current
-    LaunchedEffect(config.orientation, config.screenWidthDp, config.screenHeightDp) {
-        activity?.windowPixels()?.let { (w, h) -> conn.onScreenSize(w, h) }
+    // The video area: the window minus the phone keyboard and the extra-keys row. Whenever it changes
+    // (rotation, keyboard shown/hidden, IME resized) the PC window follows, debounced so a keyboard
+    // animation or a rotation sends one resize, not dozens.
+    var areaPx by remember { mutableStateOf(0 to 0) }
+    LaunchedEffect(areaPx) {
+        val (w, h) = areaPx
+        if (w <= 0 || h <= 0) return@LaunchedEffect
+        delay(RESIZE_DEBOUNCE_MS)
+        conn.onScreenSize(w, h)
     }
+    val density = LocalDensity.current
+    val imePx = WindowInsets.ime.getBottom(density)
+    val imeVisible = imePx > 0
+    val reservePx = if (imeVisible) imePx + with(density) { ExtraKeysHeight.roundToPx() } else 0
 
     if (current == null) {
         LaunchedEffect(Unit) { app.navigate(Screen.Apps) }
@@ -108,8 +135,6 @@ fun SessionScreen(app: PenlinkApp, conn: HostConnection, selectedId: Long) {
     var trackpad by remember { mutableStateOf(false) }
     var stripVisible by remember { mutableStateOf(true) }
     var activity_ticks by remember { mutableIntStateOf(0) }
-    var keyboardOpen by remember { mutableStateOf(false) }
-    var systemIme by remember { mutableStateOf(false) }
     var showSettings by remember { mutableStateOf(false) }
     val keyLogic = remember(current.localId) { KeyboardLogic() }
     val status by current.status.collectAsState()
@@ -132,8 +157,31 @@ fun SessionScreen(app: PenlinkApp, conn: HostConnection, selectedId: Long) {
         for (a in actions) current.sendInput(InputMsg.key(a.down, a.vk))
     }
 
+    // Keyboard hidden (or tab switched): let go of any sticky modifier.
+    LaunchedEffect(imeVisible, current.localId) {
+        if (!imeVisible) sendKeys(keyLogic.releaseAll())
+    }
+
+    // Text from the phone keyboard: plain `text`, or real key combos while a sticky modifier is on.
+    val onImeText = rememberUpdatedState<(String) -> Unit> { s ->
+        for (p in ImeMapping.plan(s, keyLogic.anyActive())) {
+            when (p) {
+                is ImePiece.Text -> current.sendInput(InputMsg.text(p.s))
+                is ImePiece.Key -> sendKeys(keyLogic.tapKey(p.key))
+            }
+        }
+    }
+    val onImeVk = rememberUpdatedState<(Int) -> Unit> { vk ->
+        sendKeys(keyLogic.tapKey(KeyDef("", vk)))
+    }
+
     Box(Modifier.fillMaxSize().background(Color.Black)) {
-        // Video + input, recreated per tab so each keeps its own renderer and zoom.
+        // Video + input, recreated per tab so each keeps its own renderer and zoom. It only
+        // occupies the area above the keyboard; the PC window is resized to match.
+        Box(
+            Modifier.fillMaxSize().padding(bottom = with(density) { reservePx.toDp() })
+                .onSizeChanged { areaPx = it.width to it.height },
+        ) {
         androidx.compose.runtime.key(current.localId) {
             val rtc = app.rtc
             val renderer = remember {
@@ -182,18 +230,38 @@ fun SessionScreen(app: PenlinkApp, conn: HostConnection, selectedId: Long) {
                 modifier = Modifier.fillMaxSize(),
             )
         }
+        }
 
-        // Hidden text sink for the phone's normal keyboard.
+        // Hidden text sink for the phone's keyboard.
         AndroidView(
             factory = { ctx -> ImeCaptureView(ctx).also { imeRef = it } },
-            update = { it.sink = { json -> current.sendInput(json) } },
+            update = {
+                it.onText = { s -> onImeText.value(s) }
+                it.onVk = { vk -> onImeVk.value(vk) }
+            },
             modifier = Modifier.size(1.dp),
         )
 
-        // Status overlay while connecting or after the app closed.
+        // Status overlay while connecting, reconnecting, or after the app closed.
+        val linkState by conn.link.collectAsState()
         when (val s = status) {
+            SessionStatus.Reconnecting ->
+                Column(Modifier.align(Alignment.Center).clip(RoundedCornerShape(12.dp)).background(Color(0xE61E1E2E)).padding(24.dp), horizontalAlignment = Alignment.CenterHorizontally) {
+                    if (linkState is LinkState.Unreachable) {
+                        Text("Can't reach ${conn.host.name}", color = Color.White, style = MaterialTheme.typography.titleMedium)
+                        Text(
+                            "No answer for 30 seconds. Is the PC on and penlink-host running? Still trying in the background.",
+                            color = Color.White,
+                            modifier = Modifier.padding(top = 6.dp),
+                        )
+                        Button(onClick = { conn.retryNow() }, modifier = Modifier.padding(top = 12.dp)) { Text("Retry now") }
+                    } else {
+                        CircularProgressIndicator(color = Color.White)
+                        Text("Reconnecting to ${conn.host.name}...", color = Color.White, modifier = Modifier.padding(top = 12.dp))
+                    }
+                }
             SessionStatus.Opening, SessionStatus.Connecting ->
-                Column(Modifier.align(Alignment.Center), horizontalAlignment = Alignment.CenterHorizontally) {
+                Column(Modifier.align(Alignment.Center).clip(RoundedCornerShape(12.dp)).background(Color(0xE61E1E2E)).padding(24.dp), horizontalAlignment = Alignment.CenterHorizontally) {
                     CircularProgressIndicator(color = Color.White)
                     Text(
                         if (s == SessionStatus.Opening) "Opening $title..." else "Connecting...",
@@ -202,7 +270,7 @@ fun SessionScreen(app: PenlinkApp, conn: HostConnection, selectedId: Long) {
                     )
                 }
             is SessionStatus.Closed -> Column(
-                Modifier.align(Alignment.Center).padding(24.dp),
+                Modifier.align(Alignment.Center).clip(RoundedCornerShape(12.dp)).background(Color(0xE61E1E2E)).padding(24.dp),
                 horizontalAlignment = Alignment.CenterHorizontally,
             ) {
                 Text("$title closed (${s.reason})", color = Color.White)
@@ -239,7 +307,7 @@ fun SessionScreen(app: PenlinkApp, conn: HostConnection, selectedId: Long) {
                                 .padding(start = 10.dp),
                             verticalAlignment = Alignment.CenterVertically,
                         ) {
-                            if (st == SessionStatus.Opening || st == SessionStatus.Connecting) {
+                            if (st == SessionStatus.Opening || st == SessionStatus.Connecting || st == SessionStatus.Reconnecting) {
                                 CircularProgressIndicator(
                                     modifier = Modifier.padding(end = 6.dp).size(14.dp),
                                     strokeWidth = 2.dp,
@@ -278,15 +346,10 @@ fun SessionScreen(app: PenlinkApp, conn: HostConnection, selectedId: Long) {
                     Icon(Icons.Default.Tune, contentDescription = "Session settings", tint = Color.White)
                 }
                 IconButton(onClick = {
-                    keyboardOpen = !keyboardOpen
-                    if (!keyboardOpen) {
-                        sendKeys(keyLogic.releaseAll())
-                        if (systemIme) imeRef?.hide()
-                        systemIme = false
-                    }
+                    if (imeVisible) imeRef?.hide() else imeRef?.show()
                     activity_ticks++
                 }) {
-                    Icon(Icons.Default.Keyboard, contentDescription = "Keyboard", tint = if (keyboardOpen) Color(0xFF89B4FA) else Color.White)
+                    Icon(Icons.Default.Keyboard, contentDescription = "Keyboard", tint = if (imeVisible) Color(0xFF89B4FA) else Color.White)
                 }
             }
         } else {
@@ -299,24 +362,14 @@ fun SessionScreen(app: PenlinkApp, conn: HostConnection, selectedId: Long) {
             )
         }
 
-        if (keyboardOpen && !systemIme) {
-            KeyboardPanel(
+        // Extra keys, docked exactly on top of the phone keyboard (the offset follows the IME
+        // animation because it is read from the IME insets every frame).
+        if (imeVisible) {
+            ExtraKeysRow(
                 logic = keyLogic,
                 onKeys = { sendKeys(it) },
-                onSystemKeyboard = {
-                    systemIme = true
-                    imeRef?.show()
-                },
-                modifier = Modifier.align(Alignment.BottomCenter),
+                modifier = Modifier.align(Alignment.BottomCenter).windowInsetsPadding(WindowInsets.ime),
             )
-        } else if (keyboardOpen && systemIme) {
-            Button(
-                onClick = {
-                    systemIme = false
-                    imeRef?.hide()
-                },
-                modifier = Modifier.align(Alignment.TopEnd).padding(top = 48.dp, end = 8.dp),
-            ) { Text("Penlink keyboard") }
         }
     }
 
@@ -351,6 +404,18 @@ private fun ScaleSheet(app: PenlinkApp, session: RemoteSession, onDismiss: () ->
                 },
             )
             Text("Video: ${session.requestedSize.value.first} x ${session.requestedSize.value.second} px")
+            val win by session.windowSize.collectAsState()
+            win?.let { w ->
+                Text("PC window: ${w.width} x ${w.height} px", style = MaterialTheme.typography.bodySmall)
+                if (w.fitted) {
+                    Text(
+                        fittedHint(session.requestedSize.value.first, w.width),
+                        color = MaterialTheme.colorScheme.error,
+                        style = MaterialTheme.typography.bodyMedium,
+                        modifier = Modifier.padding(top = 4.dp),
+                    )
+                }
+            }
         }
     }
 }

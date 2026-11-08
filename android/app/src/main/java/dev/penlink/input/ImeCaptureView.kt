@@ -8,7 +8,6 @@ import android.view.inputmethod.BaseInputConnection
 import android.view.inputmethod.EditorInfo
 import android.view.inputmethod.InputConnection
 import android.view.inputmethod.InputMethodManager
-import dev.penlink.protocol.InputMsg
 
 /**
  * An invisible text sink for the phone's normal keyboard. Typed characters go out as `text`
@@ -16,7 +15,11 @@ import dev.penlink.protocol.InputMsg
  * as key events or as deleteSurroundingText).
  */
 class ImeCaptureView(context: Context) : View(context) {
-    var sink: (String) -> Unit = {}
+    /** Text committed by the keyboard (may contain newlines). */
+    var onText: (String) -> Unit = {}
+
+    /** A key the keyboard asked for (Backspace, Enter, Tab, Delete): press and release this VK. */
+    var onVk: (Int) -> Unit = {}
 
     init {
         isFocusable = true
@@ -43,7 +46,8 @@ class ImeCaptureView(context: Context) : View(context) {
             override fun finishComposingText(): Boolean = true
 
             override fun deleteSurroundingText(beforeLength: Int, afterLength: Int): Boolean {
-                repeat(beforeLength.coerceAtLeast(1)) { tapVk(Vk.BACK) }
+                repeat(beforeLength) { tapVk(Vk.BACK) }
+                repeat(afterLength) { tapVk(Vk.DELETE) }
                 return true
             }
 
@@ -53,6 +57,7 @@ class ImeCaptureView(context: Context) : View(context) {
                         KeyEvent.KEYCODE_DEL -> tapVk(Vk.BACK)
                         KeyEvent.KEYCODE_ENTER -> tapVk(Vk.RETURN)
                         KeyEvent.KEYCODE_TAB -> tapVk(Vk.TAB)
+                        KeyEvent.KEYCODE_FORWARD_DEL -> tapVk(Vk.DELETE)
                         else -> {
                             val u = event.unicodeChar
                             if (u != 0) sendString(String(Character.toChars(u)))
@@ -69,19 +74,9 @@ class ImeCaptureView(context: Context) : View(context) {
         }
     }
 
-    private fun sendString(s: String) {
-        // A newline in committed text is Enter, the rest is typed as Unicode text.
-        val parts = s.split('\n')
-        parts.forEachIndexed { i, part ->
-            if (part.isNotEmpty()) sink(InputMsg.text(part))
-            if (i < parts.lastIndex) tapVk(Vk.RETURN)
-        }
-    }
+    private fun sendString(s: String) = onText(s)
 
-    private fun tapVk(vk: Int) {
-        sink(InputMsg.key(true, vk))
-        sink(InputMsg.key(false, vk))
-    }
+    private fun tapVk(vk: Int) = onVk(vk)
 
     fun show() {
         requestFocus()

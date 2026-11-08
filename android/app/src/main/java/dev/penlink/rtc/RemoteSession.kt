@@ -67,6 +67,10 @@ class RemoteSession(
         if (_status.value == SessionStatus.Opening) _status.value = SessionStatus.Connecting
     }
 
+    fun onTitle(title: String) {
+        if (title.isNotBlank()) _title.value = title
+    }
+
     fun onOffer(sdp: String) {
         val id = sessionId ?: return
         val config = PeerConnection.RTCConfiguration(emptyList()).apply {

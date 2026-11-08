@@ -30,11 +30,11 @@ class PairException(message: String) : Exception(message)
 class HostApi(val http: OkHttpClient = defaultClient()) {
     private val json = Json { ignoreUnknownKeys = true }
 
-    suspend fun pair(address: String, code: String, deviceName: String): PairResponse {
+    suspend fun pair(address: String, code: String, deviceName: String): PairResponse = withContext(Dispatchers.IO) {
         val body = json.encodeToString(PairRequest.serializer(), PairRequest(code, deviceName))
             .toRequestBody("application/json".toMediaType())
         val req = Request.Builder().url(HostAddress.httpBase(address) + "/pair").post(body).build()
-        return http.newCall(req).await().use { resp ->
+        http.newCall(req).await().use { resp ->
             when {
                 resp.code == 403 -> throw PairException("Wrong or expired code")
                 !resp.isSuccessful -> throw PairException("Host answered ${resp.code}")
@@ -43,17 +43,17 @@ class HostApi(val http: OkHttpClient = defaultClient()) {
         }
     }
 
-    suspend fun info(address: String): InfoResponse {
+    suspend fun info(address: String): InfoResponse = withContext(Dispatchers.IO) {
         val req = Request.Builder().url(HostAddress.httpBase(address) + "/info").build()
-        return http.newCall(req).await().use { resp ->
+        http.newCall(req).await().use { resp ->
             if (!resp.isSuccessful) throw IOException("Host answered ${resp.code}")
             json.decodeFromString(InfoResponse.serializer(), resp.body.string())
         }
     }
 
-    suspend fun apps(address: String, token: String): List<AppEntry> {
+    suspend fun apps(address: String, token: String): List<AppEntry> = withContext(Dispatchers.IO) {
         val req = Request.Builder().url(HostAddress.httpBase(address) + "/apps").auth(token).build()
-        return http.newCall(req).await().use { resp ->
+        http.newCall(req).await().use { resp ->
             if (resp.code == 401) throw IOException("Unauthorised: pair again")
             if (!resp.isSuccessful) throw IOException("Host answered ${resp.code}")
             json.decodeFromString(ListSerializer(AppEntry.serializer()), resp.body.string())

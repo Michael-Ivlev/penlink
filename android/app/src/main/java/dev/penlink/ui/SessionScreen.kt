@@ -26,6 +26,7 @@ import androidx.compose.material.icons.filled.TouchApp
 import androidx.compose.material.icons.filled.Tune
 import androidx.compose.material.icons.filled.ZoomOutMap
 import androidx.compose.material3.Button
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -192,11 +193,14 @@ fun SessionScreen(app: PenlinkApp, conn: HostConnection, selectedId: Long) {
         // Status overlay while connecting or after the app closed.
         when (val s = status) {
             SessionStatus.Opening, SessionStatus.Connecting ->
-                Text(
-                    if (s == SessionStatus.Opening) "Opening $title..." else "Connecting...",
-                    color = Color.White,
-                    modifier = Modifier.align(Alignment.Center),
-                )
+                Column(Modifier.align(Alignment.Center), horizontalAlignment = Alignment.CenterHorizontally) {
+                    CircularProgressIndicator(color = Color.White)
+                    Text(
+                        if (s == SessionStatus.Opening) "Opening $title..." else "Connecting...",
+                        color = Color.White,
+                        modifier = Modifier.padding(top = 12.dp),
+                    )
+                }
             is SessionStatus.Closed -> Column(
                 Modifier.align(Alignment.Center).padding(24.dp),
                 horizontalAlignment = Alignment.CenterHorizontally,
@@ -223,6 +227,7 @@ fun SessionScreen(app: PenlinkApp, conn: HostConnection, selectedId: Long) {
                 ) {
                     for (s in sessions) {
                         val t by s.title.collectAsState()
+                        val st by s.status.collectAsState()
                         val selected = s.localId == current.localId
                         Row(
                             Modifier.clip(RoundedCornerShape(8.dp))
@@ -234,6 +239,13 @@ fun SessionScreen(app: PenlinkApp, conn: HostConnection, selectedId: Long) {
                                 .padding(start = 10.dp),
                             verticalAlignment = Alignment.CenterVertically,
                         ) {
+                            if (st == SessionStatus.Opening || st == SessionStatus.Connecting) {
+                                CircularProgressIndicator(
+                                    modifier = Modifier.padding(end = 6.dp).size(14.dp),
+                                    strokeWidth = 2.dp,
+                                    color = if (selected) Color.Black else Color.White,
+                                )
+                            }
                             Text(
                                 t,
                                 color = if (selected) Color.Black else Color.White,

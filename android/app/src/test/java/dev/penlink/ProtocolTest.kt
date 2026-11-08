@@ -10,6 +10,7 @@ import dev.penlink.protocol.TouchAction
 import dev.penlink.protocol.WsIn
 import dev.penlink.protocol.WsOut
 import dev.penlink.protocol.WsParser
+import dev.penlink.protocol.describeClose
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.boolean
@@ -83,6 +84,27 @@ class ProtocolTest {
         assertEquals(WsIn.Error("bad"), WsParser.parse("""{"type":"error","message":"bad"}"""))
         assertNull(WsParser.parse("not json"))
         assertNull(WsParser.parse("""{"type":"mystery"}"""))
+    }
+
+    @Test
+    fun opened_with_empty_title_then_title_update() {
+        assertEquals(
+            WsIn.Opened("s1", "app", ""),
+            WsParser.parse("""{"type":"opened","sessionId":"s1","appId":"app","title":""}"""),
+        )
+        assertEquals(
+            WsIn.Title("s1", "Untitled - Notepad"),
+            WsParser.parse("""{"type":"title","sessionId":"s1","title":"Untitled - Notepad"}"""),
+        )
+        assertNull(WsParser.parse("""{"type":"title","sessionId":"s1"}"""))
+    }
+
+    @Test
+    fun close_notice_text() {
+        assertEquals("Notepad closed: app exited", describeClose("Notepad", "app exited"))
+        assertEquals("Foo could not be opened: timed out waiting for the app window",
+            describeClose("Foo", "error: timed out waiting for the app window"))
+        assertEquals("Foo closed", describeClose("Foo", ""))
     }
 
     @Test

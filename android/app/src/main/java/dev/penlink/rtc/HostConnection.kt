@@ -6,6 +6,10 @@ import dev.penlink.protocol.HostAddress
 import dev.penlink.protocol.WsIn
 import dev.penlink.protocol.WsOut
 import dev.penlink.protocol.WsParser
+import dev.penlink.protocol.describeClose
+import kotlinx.coroutines.flow.MutableSharedFlow
+import kotlinx.coroutines.flow.SharedFlow
+import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -31,6 +35,11 @@ class HostConnection(
 
     /** Last host-level error message (shown by the UI). */
     val lastError = MutableStateFlow<String?>(null)
+
+    private val _notices = MutableSharedFlow<String>(extraBufferCapacity = 16)
+
+    /** One-line messages for the user (a tab was closed by the host, and why). */
+    val notices: SharedFlow<String> = _notices.asSharedFlow()
 
     private val pendingOpen = ArrayDeque<RemoteSession>()
 
@@ -88,9 +97,19 @@ class HostConnection(
                     }
                     s?.onOpened(m.sessionId, m.title)
                 }
+                is WsIn.Title -> find(m.sessionId)?.onTitle(m.title)
                 is WsIn.Offer -> find(m.sessionId)?.onOffer(m.sdp)
                 is WsIn.Ice -> find(m.sessionId)?.onRemoteIce(m.candidate, m.sdpMid, m.sdpMLineIndex)
-                is WsIn.Closed -> find(m.sessionId)?.onClosedByHost(m.reason)
+                is WsIn.Closed -> {
+                    // Host ended the session (launch failed, app exited, ...): drop the tab, say why.
+                    // A close we asked for already removed the tab, so find() is null and nothing happens.
+                    val s = find(m.sessionId)
+                    if (s != null) {
+                        s.onClosedByHost(m.reason)
+                        _sessions.value = _sessions.value - s
+                        _notices.tryEmit(describeClose(s.title.value, m.reason))
+                    }
+                }
                 is WsIn.Error -> {
                     lastError.value = m.message
                     // An error while a session still waits for "opened" means that open failed.

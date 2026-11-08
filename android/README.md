@@ -35,3 +35,9 @@ Strip buttons: new app, tabs (x closes), direct/trackpad mode, reset zoom, UI sc
   tap then drag = left-button drag, two-finger drag = wheel.
 - Keyboard: Penlink's coding keyboard (modifiers: tap = next key, double tap = locked). "ABC" key at the
   right switches to the phone's normal keyboard, whose text goes out as `text` messages.
+
+## Debug: open a raw appId
+
+Debug builds only: `adb shell am start -n dev.penlink/.MainActivity --es openAppId "'exe:C:\path\testpad.exe C:\log.txt'"`
+connects to the first saved PC and opens that appId in a new tab (used by the end-to-end test with the host's
+`testpad` example window).

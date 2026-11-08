@@ -62,7 +62,7 @@ fun AppsScreen(app: PenlinkApp, conn: HostConnection) {
         try {
             apps = app.api.apps(conn.host.address, conn.host.token)
         } catch (e: Exception) {
-            error = e.message ?: "Could not load apps"
+            error = e.message ?: ("Could not load apps (" + e.javaClass.simpleName + ")")
         }
     }
 

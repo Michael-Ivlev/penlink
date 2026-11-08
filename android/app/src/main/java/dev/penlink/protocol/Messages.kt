@@ -70,6 +70,8 @@ object WsOut {
 /** Host -> phone WebSocket messages. */
 sealed interface WsIn {
     data class Opened(val sessionId: String, val appId: String, val title: String) : WsIn
+    /** Window title became known or changed (sent after `opened`). */
+    data class Title(val sessionId: String, val title: String) : WsIn
     data class Offer(val sessionId: String, val sdp: String) : WsIn
     data class Ice(val sessionId: String, val candidate: String, val sdpMid: String?, val sdpMLineIndex: Int) : WsIn
     data class Closed(val sessionId: String, val reason: String) : WsIn
@@ -86,6 +88,7 @@ object WsParser {
         fun s(k: String) = (o[k] as? JsonPrimitive)?.contentOrNull
         return when (s("type")) {
             "opened" -> WsIn.Opened(s("sessionId") ?: return null, s("appId") ?: "", s("title") ?: "")
+            "title" -> WsIn.Title(s("sessionId") ?: return null, s("title") ?: return null)
             "offer" -> WsIn.Offer(s("sessionId") ?: return null, s("sdp") ?: return null)
             "ice" -> WsIn.Ice(
                 s("sessionId") ?: return null,
@@ -97,6 +100,16 @@ object WsParser {
             "error" -> WsIn.Error(s("message") ?: "")
             else -> null
         }
+    }
+}
+
+/** Toast text when the host ends a session ("Notepad closed: app exited"). */
+fun describeClose(title: String, reason: String): String {
+    val why = reason.removePrefix("error:").trim()
+    return when {
+        reason.isBlank() -> "$title closed"
+        reason.startsWith("error:") -> "$title could not be opened: $why"
+        else -> "$title closed: $why"
     }
 }
 

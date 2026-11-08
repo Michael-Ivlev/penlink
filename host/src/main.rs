@@ -34,6 +34,9 @@ struct Cli {
     /// Internal: elevated driver removal using the tools in this folder.
     #[arg(long, hide = true, value_name = "DIR")]
     elevated_uninstall: Option<std::path::PathBuf>,
+    /// Do not forward Windows notifications to the phone.
+    #[arg(long)]
+    no_notifications: bool,
     /// Deliberately fault, to check that the crash report works.
     #[arg(long, hide = true)]
     selftest_crash: bool,
@@ -77,6 +80,7 @@ async fn main() -> Result<()> {
         force_pair: cli.pair,
         store_path: cli.store,
         virtual_monitors: !cli.no_vdisplay,
+        forward_notifications: !cli.no_notifications,
         ..Config::default()
     };
     let mut srv = server::start(cfg).await?;

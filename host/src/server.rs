@@ -3,6 +3,7 @@
 use crate::apps::{self, AppInfo};
 use crate::launcher::{self, Target};
 use crate::netfilter;
+use crate::notifications::{self, NotifEvent, Notifier, WinSource};
 use crate::pipeline::PipelineEvent;
 use crate::protocol::*;
 use crate::session::{new_session_id, CloseKind, OpenParams, Session};
@@ -49,6 +50,9 @@ pub struct Config {
     pub print_code: bool,
     /// Use the SudoVDA driver (one virtual monitor per opened app) when it is installed.
     pub virtual_monitors: bool,
+    /// Forward Windows notifications to phones that connect to `/notify` (asks Windows for
+    /// permission once). Off by default so tests never show a prompt; `main` turns it on.
+    pub forward_notifications: bool,
 }
 
 impl Default for Config {
@@ -62,6 +66,7 @@ impl Default for Config {
             host_name: None,
             print_code: true,
             virtual_monitors: true,
+            forward_notifications: false,
         }
     }
 }
@@ -83,6 +88,8 @@ pub struct AppState {
     /// The session lists of the live WebSockets, so a phone that comes back after a network change
     /// can take over what its old (not yet noticed as dead) connection still holds.
     conns: std::sync::Mutex<Vec<std::sync::Weak<ConnSessions>>>,
+    /// Windows notification forwarding; `None` when turned off.
+    notifier: Option<Arc<Notifier>>,
 }
 
 impl AppState {
@@ -147,6 +154,7 @@ pub struct RunningServer {
     shutdown: Option<oneshot::Sender<()>>,
     join: Option<tokio::task::JoinHandle<()>>,
     reaper: Option<tokio::task::JoinHandle<()>>,
+    notif_poller: Option<tokio::task::JoinHandle<()>>,
 }
 
 impl RunningServer {
@@ -156,6 +164,9 @@ impl RunningServer {
     }
 
     pub async fn shutdown(mut self) {
+        if let Some(p) = self.notif_poller.take() {
+            p.abort();
+        }
         if let Some(tx) = self.shutdown.take() {
             let _ = tx.send(());
         }
@@ -199,6 +210,7 @@ pub async fn start(cfg: Config) -> Result<RunningServer> {
         .with_context(|| format!("cannot listen on {}:{}", cfg.bind, cfg.port))?;
     let addr = listener.local_addr()?;
     let vd = if cfg.virtual_monitors { tokio::task::spawn_blocking(crate::vdisplay::start_manager).await.ok().flatten() } else { None };
+    let notifier = cfg.forward_notifications.then(|| Notifier::new(Arc::new(WinSource::new())));
     let state = Arc::new(AppState {
         cfg,
         host_name,
@@ -208,6 +220,15 @@ pub async fn start(cfg: Config) -> Result<RunningServer> {
         icons: Mutex::new(HashMap::new()),
         vd: vd.clone(),
         conns: std::sync::Mutex::new(Vec::new()),
+        notifier: notifier.clone(),
+    });
+    let notif_poller = notifier.map(|n| {
+        // The permission prompt blocks, so it must not hold up the server.
+        let n2 = n.clone();
+        tokio::task::spawn_blocking(move || {
+            n2.ensure_access_blocking();
+        });
+        n.spawn_poller()
     });
     // Monitors kept for a phone that never came back are removed after their grace period.
     let reaper = vd.map(|vd| {
@@ -229,8 +250,9 @@ pub async fn start(cfg: Config) -> Result<RunningServer> {
     let private = Router::new()
         .route("/apps", get(list_apps))
         .route("/apps/{id}/icon", get(app_icon))
+        .route("/appicon", get(notif_app_icon))
         .route_layer(middleware::from_fn_with_state(state.clone(), require_bearer));
-    let ws = Router::new().route("/ws", get(ws_handler));
+    let ws = Router::new().route("/ws", get(ws_handler)).route("/notify", get(notify_handler));
     let app = Router::new()
         .merge(public)
         .merge(private)
@@ -251,7 +273,7 @@ pub async fn start(cfg: Config) -> Result<RunningServer> {
         }
     });
     tracing::info!("listening on {addr}");
-    Ok(RunningServer { addr, state, shutdown: Some(tx), join: Some(join), reaper })
+    Ok(RunningServer { addr, state, shutdown: Some(tx), join: Some(join), reaper, notif_poller })
 }
 
 // ---------------------------------------------------------------------------------------
@@ -361,6 +383,108 @@ async fn app_icon(State(st): State<Arc<AppState>>, Path(id): Path<String>) -> Re
 
 fn png_response(png: Vec<u8>) -> Response {
     ([(header::CONTENT_TYPE, "image/png"), (header::CACHE_CONTROL, "max-age=3600")], png).into_response()
+}
+
+#[derive(serde::Deserialize)]
+struct AppIconQuery {
+    #[serde(rename = "appId")]
+    app_id: String,
+}
+
+/// Logo of the app behind a forwarded notification (as Windows gave it; usually PNG).
+async fn notif_app_icon(State(st): State<Arc<AppState>>, Query(q): Query<AppIconQuery>) -> Response {
+    let bytes = st.notifier.as_ref().and_then(|n| n.logo(&q.app_id));
+    match bytes {
+        Some(b) => {
+            let ct = if b.starts_with(&[0x89, b'P', b'N', b'G']) {
+                "image/png"
+            } else if b.starts_with(&[0xFF, 0xD8]) {
+                "image/jpeg"
+            } else {
+                "application/octet-stream"
+            };
+            ([(header::CONTENT_TYPE, ct), (header::CACHE_CONTROL, "max-age=3600")], b).into_response()
+        }
+        None => StatusCode::NOT_FOUND.into_response(),
+    }
+}
+
+async fn notify_handler(
+    State(st): State<Arc<AppState>>,
+    Query(q): Query<WsQuery>,
+    headers: HeaderMap,
+    ws: WebSocketUpgrade,
+) -> Response {
+    let token = q.token.or_else(|| bearer(&headers));
+    let ok = match token {
+        Some(t) => st.store.lock().await.is_valid_token(&t),
+        None => false,
+    };
+    if !ok {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    let Some(notifier) = st.notifier.clone() else { return StatusCode::NOT_FOUND.into_response() };
+    ws.on_upgrade(move |sock| notify_loop(sock, st, notifier))
+}
+
+/// One phone's notification socket: `ready`, then every added/removed notification; the phone
+/// may send `dismissNotification`. It lives as long as the phone wants (pings every 4 s,
+/// 12 s of silence = gone).
+async fn notify_loop(socket: WebSocket, st: Arc<AppState>, notifier: Arc<Notifier>) {
+    let (mut sink, mut stream) = socket.split();
+    let mut sub = notifier.subscribe().await;
+    let ready = NotifyServerMsg::Ready { ids: sub.ids.clone(), access: sub.access.wire().to_string() };
+    if send_json(&mut sink, &ready).await.is_err() {
+        return;
+    }
+    tracing::info!("phone listens for notifications ({} connected)", notifier.clients());
+    let mut ping = tokio::time::interval(PING_EVERY);
+    let mut last_heard = Instant::now();
+    loop {
+        tokio::select! {
+            ev = sub.events.recv() => {
+                let msg = match ev {
+                    Ok(NotifEvent::Added(n)) => {
+                        let apps = st.apps(false).await;
+                        NotifyServerMsg::Notification {
+                            open_app_id: notifications::map_app(&apps, &n.app_id, &n.app_name),
+                            id: n.id, app_id: n.app_id, app_name: n.app_name, title: n.title, body: n.body, time: n.time_ms,
+                        }
+                    }
+                    Ok(NotifEvent::Removed(id)) => NotifyServerMsg::NotificationRemoved { id },
+                    // Fell behind (Lagged) or closed: end the socket, the phone reconnects and resyncs.
+                    Err(_) => break,
+                };
+                if send_json(&mut sink, &msg).await.is_err() { break; }
+            }
+            m = stream.next() => {
+                match m {
+                    Some(Ok(Message::Text(t))) => {
+                        last_heard = Instant::now();
+                        if let Ok(NotifyClientMsg::DismissNotification { id }) = serde_json::from_str(&t) {
+                            notifier.dismiss(id).await;
+                        }
+                    }
+                    Some(Ok(Message::Close(_))) | None | Some(Err(_)) => break,
+                    Some(Ok(_)) => { last_heard = Instant::now(); }
+                }
+            }
+            _ = ping.tick() => {
+                if last_heard.elapsed() > IDLE_TIMEOUT { break; }
+                if sink.send(Message::Ping(Vec::new().into())).await.is_err() { break; }
+            }
+        }
+    }
+    let _ = sink.close().await;
+    tracing::info!("phone stopped listening for notifications");
+}
+
+async fn send_json<S>(sink: &mut S, msg: &NotifyServerMsg) -> Result<(), ()>
+where
+    S: futures_util::Sink<Message> + Unpin,
+{
+    let s = serde_json::to_string(msg).map_err(|_| ())?;
+    sink.send(Message::Text(s.into())).await.map_err(|_| ())
 }
 
 #[derive(serde::Deserialize)]

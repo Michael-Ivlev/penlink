@@ -111,6 +111,40 @@ pub enum ServerMsg {
     Error { message: String },
 }
 
+/// Host -> phone on `/notify` (the notification socket).
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+#[serde(tag = "type")]
+pub enum NotifyServerMsg {
+    /// Sent first: the ids of the notifications that exist now (the phone drops its own that
+    /// are gone) and whether Windows lets the host read them (`allowed|denied|unspecified|unavailable`).
+    #[serde(rename = "ready")]
+    Ready { ids: Vec<u32>, access: String },
+    #[serde(rename = "notification", rename_all = "camelCase")]
+    Notification {
+        id: u32,
+        app_id: String,
+        app_name: String,
+        title: String,
+        body: String,
+        /// Unix time, milliseconds.
+        time: i64,
+        /// The `/apps` id that opens this app, when the host can map it.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        open_app_id: Option<String>,
+    },
+    #[serde(rename = "notificationRemoved")]
+    NotificationRemoved { id: u32 },
+}
+
+/// Phone -> host on `/notify`.
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+#[serde(tag = "type")]
+pub enum NotifyClientMsg {
+    /// The user dismissed it on the phone: remove it on the PC too.
+    #[serde(rename = "dismissNotification")]
+    DismissNotification { id: u32 },
+}
+
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PairRequest {
@@ -389,6 +423,42 @@ mod tests {
 
         let v = serde_json::to_value(ServerMsg::Error { message: "bad".into() }).unwrap();
         assert_eq!(v, json!({"type":"error","message":"bad"}));
+    }
+
+    #[test]
+    fn notify_messages_match_spec_json() {
+        let v = serde_json::to_value(NotifyServerMsg::Ready { ids: vec![1, 2], access: "allowed".into() }).unwrap();
+        assert_eq!(v, json!({"type":"ready","ids":[1,2],"access":"allowed"}));
+        let v = serde_json::to_value(NotifyServerMsg::Notification {
+            id: 7,
+            app_id: "Claude_x!App".into(),
+            app_name: "Claude".into(),
+            title: "Done".into(),
+            body: "Task finished".into(),
+            time: 1700000000000,
+            open_app_id: None,
+        })
+        .unwrap();
+        assert_eq!(
+            v,
+            json!({"type":"notification","id":7,"appId":"Claude_x!App","appName":"Claude","title":"Done","body":"Task finished","time":1700000000000i64})
+        );
+        let v = serde_json::to_value(NotifyServerMsg::Notification {
+            id: 7,
+            app_id: "a".into(),
+            app_name: "A".into(),
+            title: "".into(),
+            body: "".into(),
+            time: 1,
+            open_app_id: Some("ab12".into()),
+        })
+        .unwrap();
+        assert_eq!(v["openAppId"], "ab12");
+        let v = serde_json::to_value(NotifyServerMsg::NotificationRemoved { id: 7 }).unwrap();
+        assert_eq!(v, json!({"type":"notificationRemoved","id":7}));
+        let m: NotifyClientMsg = serde_json::from_str(r#"{"type":"dismissNotification","id":7}"#).unwrap();
+        assert_eq!(m, NotifyClientMsg::DismissNotification { id: 7 });
+        assert!(serde_json::from_str::<NotifyClientMsg>(r#"{"type":"nope"}"#).is_err());
     }
 
     #[test]

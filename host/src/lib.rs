@@ -10,6 +10,7 @@ pub mod input;
 pub mod latency;
 pub mod launcher;
 pub mod netfilter;
+pub mod notifications;
 pub mod pipeline;
 pub mod protocol;
 pub mod server;

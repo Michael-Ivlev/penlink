@@ -19,7 +19,7 @@ tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 webrtc = "=0.17.3"
 windows = { version = "0.62.2", features = [
-    "Foundation", "Graphics", "Graphics_Capture", "Graphics_DirectX", "Graphics_DirectX_Direct3D11",
+    "Foundation", "Foundation_Collections", "ApplicationModel", "Storage_Streams", "UI_Notifications", "UI_Notifications_Management", "Graphics", "Graphics_Capture", "Graphics_DirectX", "Graphics_DirectX_Direct3D11",
     "Win32_Foundation", "Win32_Graphics_Direct3D", "Win32_Graphics_Direct3D11", "Win32_Graphics_Dwm",
     "Win32_Graphics_Dxgi", "Win32_Graphics_Dxgi_Common", "Win32_Graphics_Gdi",
     "Win32_Storage_FileSystem", "Win32_System_Com", "Win32_System_Com_StructuredStorage",

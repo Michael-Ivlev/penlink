@@ -50,8 +50,13 @@ host at `10.0.2.2`, which arrives at the host as loopback.
 ### HTTP
 - `GET /info` (no auth) → `{"hostName":"...","version":"0.1.0"}`
 - `GET /apps` → `[{"id":"<stable id>","name":"Visual Studio Code"}]`, from Start
-  Menu shortcuts (user + all users), sorted by name, duplicates removed.
+  Menu shortcuts (user + all users) merged with the packaged/Store apps of
+  `shell:AppsFolder` (Terminal, Calculator, new Notepad, ...). Sorted by name,
+  duplicates removed (same name: the shortcut wins). Packaged apps are launched
+  with `IApplicationActivationManager`.
 - `GET /apps/{id}/icon` → PNG 96×96 (404 if none).
+- Test ids: an `appId` of the form `exe:<path> [arguments]` launches that program
+  (debug builds of the phone app can open one with `--es openAppId`).
 
 ### WebSocket `/ws?token=...` (JSON text frames)
 One WebSocket per phone; each opened app is a *session* with its own
@@ -69,12 +74,25 @@ Phone → host:
 - `{"type":"keyframe","sessionId":"..."}` ask for a new keyframe
 
 Host → phone:
-- `{"type":"opened","sessionId":"...","appId":"...","title":"..."}`
+- `{"type":"opened","sessionId":"...","appId":"...","title":"..."}` sent **immediately**
+  when the host accepts an `open` (before the app is launched). It assigns the
+  sessionId; `title` may be empty. The phone shows a pending tab (spinner).
+- `{"type":"title","sessionId":"...","title":"..."}` optional; the window title,
+  once the window has been found (sent before `offer`).
 - `{"type":"offer","sessionId":"...","sdp":"..."}` (host makes the offer:
-  sendonly H.264 video + data channel `input`)
+  sendonly H.264 video + data channel `input`), sent once the app window is found
+  and the peer connection is ready.
 - `{"type":"ice","sessionId":"...","candidate":"...","sdpMid":"0","sdpMLineIndex":0}`
 - `{"type":"closed","sessionId":"...","reason":"app exited|closed|error: ..."}`
-- `{"type":"error","message":"..."}`
+  ends a session at any point after `opened`, including a failed launch
+  (`error: timed out waiting for the app window`, `error: unknown app ...`). It always
+  carries a sessionId the phone already got in `opened`. The phone removes the tab
+  and shows the reason as a toast. The phone may send `close` while a session is
+  still pending; the host then abandons the launch (the app stays open) and answers `closed`.
+- `{"type":"error","message":"..."}` for problems that belong to no session
+  (bad JSON, unknown sessionId in a later message).
+
+Order for one `open`: `opened` → (`title`) → `offer` → `ice`*, or `opened` → `closed`.
 
 ### Data channel `input` (ordered, reliable, JSON text)
 All `x`,`y` are normalised 0..1 over the video frame (0,0 = top-left).

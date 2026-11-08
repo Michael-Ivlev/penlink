@@ -1,0 +1,177 @@
+//! Launch an app and find its main top-level window.
+
+use crate::apps::{shell_launch, AppInfo};
+use crate::winutil::{list_candidate_windows, process_exe_name, run_sta, Hwnd, WinInfo};
+use anyhow::{anyhow, Result};
+use std::collections::{HashMap, HashSet};
+use std::time::{Duration, Instant};
+
+#[derive(Debug, Clone)]
+pub struct Target {
+    /// Path of the .lnk or exe handed to ShellExecute.
+    pub file: String,
+    pub name: String,
+    /// Lowercase exe file name expected for the app's process(es).
+    pub exe_name: Option<String>,
+}
+
+impl Target {
+    pub fn from_app(a: &AppInfo) -> Self {
+        Self { file: a.lnk.to_string_lossy().to_string(), name: a.name.clone(), exe_name: a.exe_name.clone() }
+    }
+
+    /// `exe:<path or file name>` ids, for tests and tools.
+    pub fn from_exe_id(id: &str) -> Option<Self> {
+        let path = id.strip_prefix("exe:")?.trim();
+        if path.is_empty() {
+            return None;
+        }
+        let file_name = path.rsplit(['\\', '/']).next().unwrap_or(path).to_string();
+        let stem = file_name.trim_end_matches(".exe").trim_end_matches(".EXE").to_string();
+        let exe_name = if file_name.to_ascii_lowercase().ends_with(".exe") {
+            file_name.to_ascii_lowercase()
+        } else {
+            format!("{}.exe", file_name.to_ascii_lowercase())
+        };
+        Some(Self { file: path.to_string(), name: stem, exe_name: Some(exe_name) })
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct Found {
+    pub hwnd: Hwnd,
+    pub title: String,
+    pub pid: u32,
+}
+
+/// Pure helper: does a window belong to the target app?
+pub fn belongs(
+    win_pid: u32,
+    win_exe: Option<&str>,
+    launched_pid: Option<u32>,
+    target_exe: Option<&str>,
+) -> bool {
+    if launched_pid == Some(win_pid) {
+        return true;
+    }
+    match (win_exe, target_exe) {
+        (Some(a), Some(b)) => a.eq_ignore_ascii_case(b),
+        _ => false,
+    }
+}
+
+/// Pure helper: weaker fallback by title / exe stem for packaged apps whose process names
+/// differ from the shortcut target.
+pub fn name_matches(app_name: &str, win_title: &str, win_exe: Option<&str>) -> bool {
+    let n = app_name.trim().to_lowercase();
+    if n.len() < 3 {
+        return false;
+    }
+    if win_title.to_lowercase().contains(&n) {
+        return true;
+    }
+    if let Some(e) = win_exe {
+        let stem = e.trim_end_matches(".exe").to_lowercase();
+        let squashed: String = n.chars().filter(|c| c.is_alphanumeric()).collect();
+        if stem.len() >= 3 && (squashed == stem || squashed.contains(&stem) || stem.contains(&squashed)) {
+            return true;
+        }
+    }
+    false
+}
+
+struct ExeCache(HashMap<u32, Option<String>>);
+
+impl ExeCache {
+    fn get(&mut self, pid: u32) -> Option<String> {
+        self.0.entry(pid).or_insert_with(|| process_exe_name(pid)).clone()
+    }
+}
+
+/// Blocking: launch and wait up to `timeout` for the app window.
+pub fn launch_and_find(t: &Target, timeout: Duration) -> Result<Found> {
+    let t = t.clone();
+    run_sta(move || launch_and_find_inner(&t, timeout))
+}
+
+fn pick_first(v: Vec<(WinInfo, u32)>) -> Found {
+    // WinInfo has no size; the enumeration order is Z-order (topmost first), so the first
+    // entry is the most recently activated; that is a good tie-break.
+    let (w, _) = v.into_iter().next().unwrap();
+    Found { hwnd: w.hwnd, title: w.title, pid: w.pid }
+}
+
+fn launch_and_find_inner(t: &Target, timeout: Duration) -> Result<Found> {
+    let mut exes = ExeCache(HashMap::new());
+    let before: HashSet<Hwnd> = list_candidate_windows().iter().map(|w| w.hwnd).collect();
+    let started = Instant::now();
+    let launched = shell_launch(&t.file)?;
+    tracing::info!("launched {:?} (pid {:?}), waiting for its window", t.file, launched.pid);
+
+    let mut first_new: Option<Instant> = None;
+    loop {
+        let elapsed = started.elapsed();
+        let wins = list_candidate_windows();
+        let mut new_matches = Vec::new();
+        let mut old_matches = Vec::new();
+        for w in wins {
+            let exe = exes.get(w.pid);
+            let strong = belongs(w.pid, exe.as_deref(), launched.pid, t.exe_name.as_deref());
+            let weak = !strong && elapsed > Duration::from_millis(1500) && name_matches(&t.name, &w.title, exe.as_deref());
+            if strong || weak {
+                if before.contains(&w.hwnd) {
+                    old_matches.push((w, 0));
+                } else {
+                    new_matches.push((w, 0));
+                }
+            }
+        }
+        if !new_matches.is_empty() {
+            let since = *first_new.get_or_insert_with(Instant::now);
+            // let splash screens finish and the real window settle
+            if since.elapsed() >= Duration::from_millis(400) || elapsed > timeout / 2 {
+                return Ok(pick_first(new_matches));
+            }
+        } else if elapsed >= Duration::from_millis(2500) && !old_matches.is_empty() {
+            // Already running (single-instance app): use its existing window.
+            return Ok(pick_first(old_matches));
+        }
+        if elapsed >= timeout {
+            return Err(anyhow!("timed out waiting for the app window"));
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn exe_ids() {
+        let t = Target::from_exe_id("exe:notepad.exe").unwrap();
+        assert_eq!(t.file, "notepad.exe");
+        assert_eq!(t.name, "notepad");
+        assert_eq!(t.exe_name.as_deref(), Some("notepad.exe"));
+        let t = Target::from_exe_id(r"exe:C:\Windows\System32\Calc.EXE").unwrap();
+        assert_eq!(t.exe_name.as_deref(), Some("calc.exe"));
+        assert!(Target::from_exe_id("exe:").is_none());
+        assert!(Target::from_exe_id("abc").is_none());
+    }
+
+    #[test]
+    fn belongs_by_pid_or_exe() {
+        assert!(belongs(10, None, Some(10), None));
+        assert!(belongs(11, Some("Code.exe"), Some(10), Some("code.exe")));
+        assert!(!belongs(11, Some("other.exe"), Some(10), Some("code.exe")));
+        assert!(!belongs(11, None, Some(10), Some("code.exe")));
+    }
+
+    #[test]
+    fn name_fallback() {
+        assert!(name_matches("Calculator", "Calculator", Some("applicationframehost.exe")));
+        assert!(name_matches("Windows Terminal", "pwsh", Some("windowsterminal.exe")));
+        assert!(!name_matches("Foo", "Bar", Some("baz.exe")));
+        assert!(!name_matches("ab", "abc", None));
+    }
+}

@@ -52,7 +52,7 @@ class PalmRejector(
     companion object {
         const val GRACE_MS = 600L
 
-        /** A contact longer than this (dp) is a palm: a fingertip is about 60-90 dp, a resting palm well over 150. */
-        const val PALM_MAJOR_DP = 120f
+        /** A contact longer than this (dp, about 24 mm) is a palm: a fingertip is about 60-90 dp, a flat thumb up to about 130, a resting palm well over 170. */
+        const val PALM_MAJOR_DP = 150f
     }
 }

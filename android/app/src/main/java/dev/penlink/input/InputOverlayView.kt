@@ -122,6 +122,29 @@ class InputOverlayView(context: Context) : View(context) {
     private var penActive = false
     private var penPointerId = -1
     private var mouseActive = false
+    private var lastPenX = 0.0
+    private var lastPenY = 0.0
+    private var lastMouseX = 0.0
+    private var lastMouseY = 0.0
+
+    /** Set when focus was lost or the view detached mid-gesture: the rest of that gesture is dropped, a new ACTION_DOWN clears it. */
+    private var gestureDropped = false
+
+    /** Nothing may stay pressed on the PC when the gesture is cut off without an UP/CANCEL reaching us. */
+    private fun releaseAll() {
+        if (penActive) {
+            sink(InputMsg.pen(PenAction.Up, lastPenX, lastPenY, 0.0, 0.0, 0.0, false, false))
+            penActive = false
+        }
+        if (mouseActive) {
+            sink(InputMsg.mouse(MouseAction.Up, lastMouseX, lastMouseY, mouseButton))
+            mouseActive = false
+        }
+        cancelFinger()
+        ignored = 0
+        fingersDown = 0
+        gestureDropped = true
+    }
 
     private fun isPenTool(t: Int) = t == MotionEvent.TOOL_TYPE_STYLUS || t == MotionEvent.TOOL_TYPE_ERASER
 
@@ -140,6 +163,7 @@ class InputOverlayView(context: Context) : View(context) {
             ori = e.getAxisValue(MotionEvent.AXIS_ORIENTATION, idx)
         }
         val n = m.toNorm(x, y)
+        lastPenX = n.x; lastPenY = n.y
         val (tx, ty) = Tilt.toDegrees(tilt, ori)
         val side = (e.buttonState and MotionEvent.BUTTON_STYLUS_PRIMARY) != 0
         val eraser = e.getToolType(idx) == MotionEvent.TOOL_TYPE_ERASER
@@ -233,6 +257,7 @@ class InputOverlayView(context: Context) : View(context) {
 
     private fun handleMouse(e: MotionEvent): Boolean {
         val n = mapper().toNorm(e.x, e.y)
+        lastMouseX = n.x; lastMouseY = n.y
         when (e.actionMasked) {
             MotionEvent.ACTION_DOWN -> {
                 mouseButton = buttonOf(e.buttonState)
@@ -605,11 +630,21 @@ class InputOverlayView(context: Context) : View(context) {
 
     override fun onWindowFocusChanged(hasWindowFocus: Boolean) {
         super.onWindowFocusChanged(hasWindowFocus)
-        if (!hasWindowFocus) palm.reset() // a hover that ended while another window had focus never reports its exit
+        if (!hasWindowFocus) {
+            palm.reset() // a hover that ended while another window had focus never reports its exit
+            releaseAll()
+        }
+    }
+
+    override fun onDetachedFromWindow() {
+        releaseAll()
+        palm.reset()
+        super.onDetachedFromWindow()
     }
 
     override fun onTouchEvent(e: MotionEvent): Boolean {
         val action = e.actionMasked
+        if (action == MotionEvent.ACTION_DOWN) gestureDropped = false else if (gestureDropped) return true
         if (action == MotionEvent.ACTION_DOWN) {
             // A new gesture: deliver its events as they happen, not batched to the next frame (pen, finger, mouse).
             requestUnbufferedDispatch(e)

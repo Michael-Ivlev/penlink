@@ -241,7 +241,7 @@ writes or hovers, the resting hand must not click, scroll or zoom. The pen is "a
 600 ms after its last event (writers lift between strokes). While it is active every finger pointer is ignored, also in
 events where the pen and the palm are down together (only the pen's pointer is read; the pen may even land after the
 palm). A finger gesture already running when the pen arrives is cancelled at once (touch cancel / drag release sent, a
-pinch or scroll ended, no click). Without a pen a contact longer than 120 dp, or one the system cancelled
+pinch or scroll ended, no click). Without a pen a contact longer than 150 dp, or one the system cancelled
 (`FLAG_CANCELED`, API 33+), is a palm too: no tap is sent for it. After the grace period fingers work normally again.
 Decisions are in `PalmRejector` (pure, unit tested); `InputOverlayView` applies them. With the setting off the old
 behaviour returns. With a palm resting, a two-finger gesture is not recognised (a third pointer ends the gesture).

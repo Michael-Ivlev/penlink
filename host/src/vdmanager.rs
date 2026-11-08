@@ -116,6 +116,7 @@ impl VdManager {
         match self.setup(&guid, width, height, dpi_wanted) {
             Ok(mon) => {
                 g.leases.insert(guid, Lease { mon: mon.clone(), app_hwnd: 0, app_id: String::new(), orphan_deadline: None });
+                self.reassert_dpi(&mut g, &guid);
                 Ok(mon)
             }
             Err((e, gdi)) => {
@@ -130,6 +131,21 @@ impl VdManager {
                     }
                 }
                 Err(e)
+            }
+        }
+    }
+
+    /// Adding a monitor makes Windows fall back to 100% DPI on the monitors that already exist (seen
+    /// with two phone sessions: the first monitor lost its 200% when the second was added), so
+    /// every other monitor gets its asked-for DPI step again. Setting the step it already has is a no-op.
+    fn reassert_dpi(&self, g: &mut Inner, except: &Guid) {
+        for (guid, lease) in g.leases.iter_mut() {
+            if guid == except {
+                continue;
+            }
+            match self.backend.set_dpi(&lease.mon.gdi_name, lease.mon.dpi_wanted) {
+                Ok(a) => lease.mon.dpi_actual = a,
+                Err(e) => tracing::warn!("could not restore DPI of {}: {e}", lease.mon.gdi_name),
             }
         }
     }
@@ -207,6 +223,7 @@ impl VdManager {
             }
         };
         g.leases.insert(mon.guid, Lease { mon: new_mon.clone(), app_hwnd, app_id, orphan_deadline: deadline });
+        self.reassert_dpi(&mut g, &mon.guid);
         Ok(new_mon)
     }
 
@@ -445,6 +462,19 @@ mod tests {
         let _ = std::fs::remove_dir_all(&d);
         let p = d.join("vdisplays.json");
         (Ledger::load(&p), p)
+    }
+
+    #[test]
+    fn adding_a_monitor_restores_the_dpi_of_the_others() {
+        let be = FakeBackend::real_monitors();
+        let (l, p) = ledger("reassert");
+        let m = VdManager::new(be.clone(), l);
+        let a = m.create(1280, 2628, 200).unwrap();
+        let before = be.calls().iter().filter(|c| c.starts_with(&format!("dpi {} 200", a.gdi_name))).count();
+        let _b = m.create(1280, 2628, 200).unwrap();
+        let after = be.calls().iter().filter(|c| c.starts_with(&format!("dpi {} 200", a.gdi_name))).count();
+        assert_eq!(after, before + 1, "{:?}", be.calls());
+        let _ = std::fs::remove_dir_all(p.parent().unwrap());
     }
 
     #[test]

@@ -528,7 +528,7 @@ fn start_host(args: &Args, run_dir: &Path, port: u16, threads: u16, n: usize) ->
     let stdout_log = run_dir.join(format!("host-{n}.out.log"));
     let stderr_log = run_dir.join(format!("host-{n}.err.log"));
     let child = Command::new(&args.host_exe)
-        .args(["--port", &port.to_string(), "--store"])
+        .args(["--port", &port.to_string(), "--no-vdisplay", "--store"])
         .arg(appdata.join("host.json"))
         .arg("--verbose")
         .env("PENLINK_ENC_THREADS", threads.to_string())

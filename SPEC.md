@@ -1,4 +1,4 @@
-﻿# Penlink: spec
+# Penlink: spec
 
 Run one PC app full screen on a Galaxy S26 Ultra, with or without the S Pen.
 Windows first, Mac later. Used mainly for coding, plus general apps.
@@ -7,7 +7,7 @@ Windows first, Mac later. Used mainly for coding, plus general apps.
 1. Opens Penlink on the phone and picks their PC (reached over Tailscale).
 2. Sees a grid of the PC's installed apps and taps one.
 3. The app opens on the phone full screen: only that app, not the PC desktop.
-4. Opens more apps; each one is a tab. Rotating the phone resizes the app.
+4. Opens more apps; each one is its own session. Rotating the phone resizes the app.
 
 ## Parts
 - `host/`: PC agent, Rust (Windows now, Mac later). One binary, `penlink-host.exe`.
@@ -207,9 +207,24 @@ All `x`,`y` are normalised 0..1 over the video frame (0,0 = top-left).
 
 ## Phone app screens
 1. **Hosts:** add a host (address + pairing code), list saved hosts.
-2. **Apps:** grid of the host's apps with icons; search box.
-3. **Session:** full-screen video (immersive, no system bars), tabs for open apps
-   at the top edge (auto-hide), input layer, keyboard toggle button.
+2. **Apps:** an "Open now" section at the top lists the sessions that are already running (app icon, title, live
+   state: Connected / Reconnecting... / Opening...; tap = resume at once, X = close it), then the grid of the host's
+   apps with icons and a search box. Tapping a tile of an app that is already open resumes it instead of starting it
+   again. Android Back here with apps open sends Penlink to the background (sessions stay); the arrow in the top bar
+   leaves the PC (after a confirmation when apps are open: they are closed).
+3. **Session:** only the app, full screen (immersive, no system bars, inside the safe area) plus the extra-keys row
+   when the keyboard is up. No tab bar. A thin pill sits in the top strip (the black status-bar/cutout margin above the
+   video, so it never covers the remote app); tap it or swipe down on it to open a control bar (auto-hides after 4 s):
+   **Minimize**, the app title, trackpad/direct toggle, reset zoom, session settings, keyboard, **Close**.
+   - **Minimize** (and the Android Back gesture): back to the Apps screen. The session, the WebSocket, the PC app and
+     its virtual monitor all stay, so resuming is instant. Only the phone's renderer is released while minimized (no
+     video is drawn); the protocol has no pause message, so the host keeps streaming. The WebSocket lives as long as the
+     process; if the link drops meanwhile the normal reconnect/attach path (below) brings the session back and "Open now"
+     shows "Reconnecting...". If Android kills the process the sessions are gone (the host removes the monitor after the
+     5 s grace); open the app again from the grid.
+   - **Close**: sends `close`, the host stops the capture and removes the virtual monitor at once (about 0.3 s). The PC
+     app itself is not touched: it keeps running, its window goes back to the primary monitor (same as closing a tab
+     did before).
 
 ## Input on the phone
 | | S Pen | Finger |

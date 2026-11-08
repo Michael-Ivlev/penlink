@@ -151,6 +151,14 @@ fn h264_capability() -> RTCRtpCodecCapability {
     }
 }
 
+/// How long to wait for Explorer to put its taskbar on a new virtual monitor.
+const TASKBAR_WAIT: Duration = Duration::from_secs(4);
+
+/// The area of a virtual monitor the phone sees: its work area (no taskbar).
+fn work_of(mon: &VMonitor) -> Rect {
+    crate::vdisplay::work_rect(mon.hmonitor).unwrap_or(mon.rect)
+}
+
 pub fn new_session_id() -> String {
     crate::store::hex(&crate::store::random_bytes::<8>())
 }
@@ -164,12 +172,17 @@ impl Session {
         let (shared, window, source, monitor_session);
         if let Some((mgr, mon)) = monitor {
             // The window is already on the monitor, maximised. Stream the whole monitor.
-            let (vw, vh) = clamp_video(mon.rect.w.max(2) as u32, mon.rect.h.max(2) as u32);
+            // Stream the work area: the monitor minus the taskbar Windows adds to every display.
+            let (hm, mr) = (mon.hmonitor, mon.rect);
+            let work = tokio::task::spawn_blocking(move || crate::vdisplay::settled_work_rect(hm, mr, TASKBAR_WAIT)).await?;
+            let (vw, vh) = clamp_video(work.w.max(2) as u32, work.h.max(2) as u32);
             let pid = winutil::window_pid(hwnd);
-            shared = Shared::new(vw, vh, InputTarget::Monitor(MonitorTarget::new(hwnd, pid, mon.rect)));
+            let target = MonitorTarget::new(hwnd, pid, mon.rect);
+            target.set(mon.rect, work);
+            shared = Shared::new(vw, vh, InputTarget::Monitor(target));
             window = WindowReport {
-                width: mon.rect.w,
-                height: mon.rect.h,
+                width: work.w,
+                height: work.h,
                 fitted: false,
                 mode: StreamMode::Monitor,
                 dpi: Some(mon.dpi_actual),
@@ -178,7 +191,7 @@ impl Session {
             let spec = MonitorSpec { w: mon.rect.w as u32, h: mon.rect.h as u32, dpi_wanted: mon.dpi_wanted };
             monitor_session = Some(MonitorSession {
                 mgr,
-                state: StdMutex::new(MonState { view_h: spec.h, spec, mon }),
+                state: StdMutex::new(MonState { view_h: work.h as u32, spec, mon }),
             });
         } else {
             // Size the app window first so the first captured frame is already right.
@@ -427,6 +440,7 @@ impl Session {
                 let new_mon = match tokio::task::spawn_blocking(move || -> Result<VMonitor> {
                     let m = mgr.reconfigure(&m2, w, h, dpi)?;
                     winutil::place_maximized_on(hwnd, m.rect)?;
+                    crate::vdisplay::settled_work_rect(m.hmonitor, m.rect, TASKBAR_WAIT);
                     Ok(m)
                 })
                 .await?
@@ -438,7 +452,8 @@ impl Session {
                     }
                 };
                 let spec = MonitorSpec { w: new_mon.rect.w as u32, h: new_mon.rect.h as u32, dpi_wanted: dpi };
-                (new_mon, spec, spec.h)
+                let full = work_of(&new_mon).h as u32;
+                (new_mon, spec, full)
             }
             ResizeAction::InPlace { view_h, dpi_changed } => {
                 let mut mon = mon;
@@ -449,15 +464,15 @@ impl Session {
                     mon = tokio::task::spawn_blocking(move || mgr.set_dpi(&m2, dpi)).await??;
                     spec.dpi_wanted = plan.dpi_pct;
                 }
-                let view_h = view_h.min(spec.h);
+                let work = work_of(&mon);
+                let view_h = view_h.min(work.h as u32);
                 if view_h != cur_view_h || dpi_changed {
                     let m2 = mon.clone();
-                    let spec_h = spec.h;
                     tokio::task::spawn_blocking(move || -> Result<()> {
-                        if view_h >= spec_h {
+                        if view_h >= work.h as u32 {
                             winutil::place_maximized_on(hwnd, m2.rect)
                         } else {
-                            winutil::place_view_on(hwnd, Rect::new(m2.rect.x, m2.rect.y, m2.rect.w, view_h as i32)).map(|_| ())
+                            winutil::place_view_on(hwnd, Rect::new(work.x, work.y, work.w, view_h as i32)).map(|_| ())
                         }
                     })
                     .await??;
@@ -466,7 +481,8 @@ impl Session {
             }
         };
         let monitor_rect = mon.rect;
-        let view = Rect::new(monitor_rect.x, monitor_rect.y, monitor_rect.w, view_h as i32);
+        let work = work_of(&mon);
+        let view = Rect::new(work.x, work.y, work.w, view_h as i32);
         if let InputTarget::Monitor(t) = &self.shared.target {
             t.set(monitor_rect, view);
         }

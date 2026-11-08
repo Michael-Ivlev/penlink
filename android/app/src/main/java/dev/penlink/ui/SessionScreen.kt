@@ -10,6 +10,7 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -226,7 +227,14 @@ fun SessionScreen(app: PenlinkApp, conn: HostConnection, selectedId: Long) {
             }
             DisposableEffect(Unit) { onDispose { renderer.release() } }
 
-            AndroidView(factory = { renderer }, modifier = Modifier.fillMaxSize())
+            // Aspect-fit by sizing the renderer itself: a SurfaceViewRenderer given exact bounds
+            // stretches the picture to them, which would not match VideoMapper's letterbox maths
+            // whenever the video (a monitor's work area, say) differs a little from the screen.
+            val (vw, vh) = videoSize
+            AndroidView(
+                factory = { renderer },
+                modifier = if (vw > 0 && vh > 0) Modifier.align(Alignment.Center).aspectRatio(vw.toFloat() / vh) else Modifier.fillMaxSize(),
+            )
 
             AndroidView(
                 factory = { ctx ->

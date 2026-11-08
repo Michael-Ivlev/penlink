@@ -5,7 +5,7 @@
 use crate::encode::{H264Encoder, DEFAULT_BITRATE, MAX_FPS};
 use crate::frame::{Converter, I420};
 use crate::geom::{even, Rect};
-use crate::input::Shared;
+use crate::input::{InputTarget, Shared};
 use crate::winutil::{client_rect_screen, frame_bounds, hwnd, is_window, Hwnd};
 use anyhow::{anyhow, Result};
 use bytes::Bytes;
@@ -30,6 +30,7 @@ use windows::Win32::Graphics::Direct3D11::{
     D3D11_SDK_VERSION, D3D11_TEXTURE2D_DESC, D3D11_USAGE_STAGING,
 };
 use windows::Win32::Graphics::Dxgi::IDXGIDevice;
+use windows::Win32::Graphics::Gdi::HMONITOR;
 use windows::Win32::System::WinRT::Direct3D11::{
     CreateDirect3D11DeviceFromDXGIDevice, IDirect3DDxgiInterfaceAccess,
 };
@@ -39,6 +40,23 @@ use windows::Win32::System::WinRT::{RoInitialize, RO_INIT_MULTITHREADED};
 const KEYFRAME_INTERVAL: Duration = Duration::from_secs(4);
 const MIN_FRAME_INTERVAL: Duration = Duration::from_micros(16_000); // ~60 fps cap
 const IDLE_RESEND: Duration = Duration::from_millis(450); // >= ~2 fps even when nothing changes
+
+/// What is captured.
+#[derive(Debug, Clone, Copy)]
+pub enum CaptureSource {
+    Window(Hwnd),
+    /// A whole (virtual) monitor. `watch` is the app window: when it is gone the session ends.
+    Monitor { hmonitor: isize, watch: Hwnd },
+}
+
+impl CaptureSource {
+    fn watched_window(&self) -> Hwnd {
+        match self {
+            CaptureSource::Window(h) => *h,
+            CaptureSource::Monitor { watch, .. } => *watch,
+        }
+    }
+}
 
 #[derive(Debug)]
 pub enum PipelineEvent {
@@ -88,7 +106,7 @@ impl Drop for PipelineHandle {
 }
 
 pub fn spawn(
-    target: Hwnd,
+    target: CaptureSource,
     shared: Arc<Shared>,
     track: Arc<TrackLocalStaticSample>,
     rt: Handle,
@@ -133,7 +151,7 @@ fn create_staging(dev: &ID3D11Device, w: u32, h: u32, fmt: windows::Win32::Graph
 }
 
 fn run(
-    target: Hwnd,
+    target: CaptureSource,
     shared: Arc<Shared>,
     track: Arc<TrackLocalStaticSample>,
     rt: Handle,
@@ -171,7 +189,11 @@ fn run(
 
     // --- capture item / pool / session
     let interop = factory::<GraphicsCaptureItem, IGraphicsCaptureItemInterop>()?;
-    let item: GraphicsCaptureItem = unsafe { interop.CreateForWindow(hwnd(target))? };
+    let item: GraphicsCaptureItem = match target {
+        CaptureSource::Window(h) => unsafe { interop.CreateForWindow(hwnd(h))? },
+        CaptureSource::Monitor { hmonitor, .. } => unsafe { interop.CreateForMonitor(HMONITOR(hmonitor as *mut std::ffi::c_void))? },
+    };
+    let watched = target.watched_window();
     let mut pool_size = item.Size()?;
     let fmt = DirectXPixelFormat::B8G8R8A8UIntNormalized;
     let pool = Direct3D11CaptureFramePool::CreateFreeThreaded(&d3d_dev, fmt, 3, pool_size)?;
@@ -199,7 +221,7 @@ fn run(
     }
     let _ = session.SetIsCursorCaptureEnabled(true);
     session.StartCapture()?;
-    tracing::info!("capture started for window {target:#x}, item size {}x{}", pool_size.Width, pool_size.Height);
+    tracing::info!("capture started for {target:?}, item size {}x{}", pool_size.Width, pool_size.Height);
 
     // --- encoder state
     let (mut vw, mut vh) = {
@@ -222,8 +244,18 @@ fn run(
         if ctl.stop.load(Ordering::SeqCst) {
             break;
         }
-        if closed.load(Ordering::SeqCst) || !is_window(target) {
+        if !is_window(watched) {
             let _ = events.send(PipelineEvent::WindowClosed);
+            break;
+        }
+        if closed.load(Ordering::SeqCst) {
+            // A window capture item closes with its window; a monitor item closes when the
+            // monitor goes away (driver stopped, monitor removed behind our back).
+            let ev = match target {
+                CaptureSource::Window(_) => PipelineEvent::WindowClosed,
+                CaptureSource::Monitor { .. } => PipelineEvent::Error("virtual monitor lost".into()),
+            };
+            let _ = events.send(ev);
             break;
         }
         // Wait for a frame, a keepalive timeout, or a stop poll tick.
@@ -283,7 +315,11 @@ fn run(
             unsafe { ctx.Map(&st.tex, 0, D3D11_MAP_READ, 0, Some(&mut mapped))? };
             let stride = mapped.RowPitch as usize;
             let src = unsafe { std::slice::from_raw_parts(mapped.pData as *const u8, stride * desc.Height as usize) };
-            let crop = client_crop(target, desc.Width as i32, desc.Height as i32);
+            let crop = match (&target, &shared.target) {
+                (CaptureSource::Window(h), _) => client_crop(*h, desc.Width as i32, desc.Height as i32),
+                (CaptureSource::Monitor { .. }, InputTarget::Monitor(m)) => monitor_crop(m.crop(), desc.Width as i32, desc.Height as i32),
+                _ => Rect::new(0, 0, desc.Width as i32, desc.Height as i32),
+            };
             conv.convert(src, stride, crop, &mut yuv);
             unsafe { ctx.Unmap(&st.tex, 0) };
             ctl.stats.convert_us.fetch_add(t0.elapsed().as_micros() as u64, Ordering::Relaxed);
@@ -374,6 +410,20 @@ fn run(
     let _ = session.Close();
     let _ = pool.Close();
     Ok(())
+}
+
+/// The streamed part of a monitor inside the captured texture; the whole texture when the
+/// requested part does not fit.
+fn monitor_crop(want: Rect, tex_w: i32, tex_h: i32) -> Rect {
+    let full = Rect::new(0, 0, tex_w, tex_h);
+    let x = want.x.clamp(0, tex_w - 2);
+    let y = want.y.clamp(0, tex_h - 2);
+    let w = want.w.min(tex_w - x);
+    let h = want.h.min(tex_h - y);
+    if w < 2 || h < 2 {
+        return full;
+    }
+    Rect::new(x, y, w, h)
 }
 
 /// The window's client area inside the captured texture (which covers the window's visible

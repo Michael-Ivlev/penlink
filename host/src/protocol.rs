@@ -23,6 +23,13 @@ pub enum ClientMsg {
         /// Re-open after a reconnect: attach to the app's existing window, never launch it.
         #[serde(default)]
         attach: bool,
+        /// `"sharp"` (monitor = phone pixels) or `"fast"` (half). A client that sends this or
+        /// `uiScale` gets a virtual monitor when the driver is installed.
+        #[serde(default)]
+        quality: Option<String>,
+        /// UI size in percent (100..500). Without it `scale * 100` is used.
+        #[serde(default)]
+        ui_scale: Option<f64>,
     },
     #[serde(rename_all = "camelCase")]
     Answer { session_id: String, sdp: String },
@@ -42,11 +49,24 @@ pub enum ClientMsg {
         height: u32,
         #[serde(default = "default_scale")]
         scale: f64,
+        #[serde(default)]
+        quality: Option<String>,
+        #[serde(default)]
+        ui_scale: Option<f64>,
     },
     #[serde(rename_all = "camelCase")]
     Close { session_id: String },
     #[serde(rename_all = "camelCase")]
     Keyframe { session_id: String },
+}
+
+/// What the video shows (`window` message).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum StreamMode {
+    #[default]
+    Window,
+    Monitor,
 }
 
 /// Host -> phone, WebSocket text frames.
@@ -65,7 +85,18 @@ pub enum ServerMsg {
     /// The real size of the PC window (client area, physical pixels) after an open or resize.
     /// `fitted`: it was shrunk to fit the PC screen, so the video is upscaled.
     #[serde(rename_all = "camelCase")]
-    Window { session_id: String, width: i32, height: i32, fitted: bool },
+    Window {
+        session_id: String,
+        width: i32,
+        height: i32,
+        fitted: bool,
+        /// What is being streamed: the app's window, or a virtual monitor.
+        #[serde(default)]
+        mode: StreamMode,
+        /// Monitor mode: the DPI percentage Windows really applied.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        dpi: Option<u32>,
+    },
     #[serde(rename_all = "camelCase")]
     Offer { session_id: String, sdp: String },
     #[serde(rename_all = "camelCase")]
@@ -215,7 +246,15 @@ mod tests {
         .unwrap();
         assert_eq!(
             m,
-            ClientMsg::Open { app_id: "abc".into(), width: 1440, height: 3120, scale: 2.0, attach: false }
+            ClientMsg::Open {
+                app_id: "abc".into(),
+                width: 1440,
+                height: 3120,
+                scale: 2.0,
+                attach: false,
+                quality: None,
+                ui_scale: None
+            }
         );
     }
 
@@ -227,6 +266,26 @@ mod tests {
         let m: ClientMsg =
             serde_json::from_str(r#"{"type":"open","appId":"a","width":10,"height":20,"attach":true}"#).unwrap();
         assert!(matches!(m, ClientMsg::Open { attach: true, .. }));
+    }
+
+    #[test]
+    fn open_and_resize_carry_quality_and_ui_scale() {
+        let m: ClientMsg = serde_json::from_str(
+            r#"{"type":"open","appId":"a","width":1440,"height":3120,"scale":3.0,"quality":"fast","uiScale":275}"#,
+        )
+        .unwrap();
+        assert!(matches!(
+            m,
+            ClientMsg::Open { quality: Some(ref q), ui_scale: Some(u), .. } if q == "fast" && u == 275.0
+        ));
+        let m: ClientMsg = serde_json::from_str(
+            r#"{"type":"resize","sessionId":"s","width":1440,"height":1500,"scale":3.0,"quality":"sharp","uiScale":300}"#,
+        )
+        .unwrap();
+        assert!(matches!(m, ClientMsg::Resize { quality: Some(_), ui_scale: Some(u), .. } if u == 300.0));
+        // an old client without the fields still works
+        let m: ClientMsg = serde_json::from_str(r#"{"type":"resize","sessionId":"s","width":1,"height":2}"#).unwrap();
+        assert!(matches!(m, ClientMsg::Resize { quality: None, ui_scale: None, .. }));
     }
 
     #[test]
@@ -298,9 +357,29 @@ mod tests {
 
         let v = serde_json::to_value(ServerMsg::Title { session_id: "s".into(), title: "T".into() }).unwrap();
         assert_eq!(v, json!({"type":"title","sessionId":"s","title":"T"}));
-        let v = serde_json::to_value(ServerMsg::Window { session_id: "s".into(), width: 812, height: 1760, fitted: true })
-            .unwrap();
-        assert_eq!(v, json!({"type":"window","sessionId":"s","width":812,"height":1760,"fitted":true}));
+        let v = serde_json::to_value(ServerMsg::Window {
+            session_id: "s".into(),
+            width: 812,
+            height: 1760,
+            fitted: true,
+            mode: StreamMode::Window,
+            dpi: None,
+        })
+        .unwrap();
+        assert_eq!(v, json!({"type":"window","sessionId":"s","width":812,"height":1760,"fitted":true,"mode":"window"}));
+        let v = serde_json::to_value(ServerMsg::Window {
+            session_id: "s".into(),
+            width: 1440,
+            height: 3120,
+            fitted: false,
+            mode: StreamMode::Monitor,
+            dpi: Some(300),
+        })
+        .unwrap();
+        assert_eq!(v, json!({"type":"window","sessionId":"s","width":1440,"height":3120,"fitted":false,"mode":"monitor","dpi":300}));
+        // an old host message without mode still parses (as window mode)
+        let m: ServerMsg = serde_json::from_str(r#"{"type":"window","sessionId":"s","width":1,"height":2,"fitted":false}"#).unwrap();
+        assert!(matches!(m, ServerMsg::Window { mode: StreamMode::Window, dpi: None, .. }));
         let v = serde_json::to_value(ServerMsg::Closed { session_id: "s".into(), reason: "app exited".into() }).unwrap();
         assert_eq!(v, json!({"type":"closed","sessionId":"s","reason":"app exited"}));
 

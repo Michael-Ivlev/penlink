@@ -1,10 +1,12 @@
 //! One opened app: window + capture pipeline + WebRTC peer connection + input thread.
 
-use crate::geom::client_size_for;
-use crate::input::{Injector, Shared};
+use crate::geom::{client_size_for, clamp_video, Rect};
+use crate::input::{InputTarget, Injector, MonitorTarget, Shared};
 use crate::launcher::Claim;
-use crate::pipeline::{self, PipelineEvent, PipelineHandle};
-use crate::protocol::InputMsg;
+use crate::pipeline::{self, CaptureSource, PipelineEvent, PipelineHandle};
+use crate::protocol::{InputMsg, StreamMode};
+use crate::sizing::{decide_resize, plan_sizes, MonitorSpec, ResizeAction, SizeRequest};
+use crate::vdmanager::{VMonitor, VdManager, GRACE};
 use crate::winutil::{self, Hwnd};
 use anyhow::{anyhow, Result};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -65,6 +67,36 @@ pub struct Session {
     /// Keeps the window reserved for this session until it is dropped.
     claim: StdMutex<Option<Claim>>,
     pub offer_sdp: String,
+    /// Virtual monitor mode: the monitor and what is shown of it.
+    monitor: Option<MonitorSession>,
+    /// What a restarted capture pipeline needs.
+    track: Arc<TrackLocalStaticSample>,
+    ev_tx: UnboundedSender<PipelineEvent>,
+    ctl_slot: Arc<StdMutex<Option<Arc<pipeline::PipelineCtl>>>>,
+}
+
+/// The virtual monitor of a session and how it is currently used.
+struct MonitorSession {
+    mgr: Arc<VdManager>,
+    state: StdMutex<MonState>,
+}
+
+struct MonState {
+    mon: VMonitor,
+    /// Size and DPI the monitor was configured with (the keyboard view is smaller).
+    spec: MonitorSpec,
+    /// Height of the streamed part; equal to the monitor height when the whole monitor shows.
+    view_h: u32,
+}
+
+/// How a session ends.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CloseKind {
+    /// The tab was closed, the app exited or the stream failed: a virtual monitor goes now.
+    Closed,
+    /// The phone's connection dropped: a virtual monitor is kept for [`GRACE`] so the phone
+    /// can attach again.
+    PhoneGone,
 }
 
 /// The PC window the session streams, as reported to the phone (`window` message).
@@ -73,12 +105,27 @@ pub struct WindowReport {
     pub width: i32,
     pub height: i32,
     pub fitted: bool,
+    pub mode: StreamMode,
+    /// Monitor mode: the DPI percentage Windows applied.
+    pub dpi: Option<u32>,
 }
 
 impl From<winutil::Resized> for WindowReport {
     fn from(r: winutil::Resized) -> Self {
-        Self { width: r.got.0, height: r.got.1, fitted: r.fitted }
+        Self { width: r.got.0, height: r.got.1, fitted: r.fitted, mode: StreamMode::Window, dpi: None }
     }
+}
+
+/// Everything `Session::open` needs.
+pub struct OpenParams {
+    pub id: String,
+    pub app_id: String,
+    pub hwnd: Hwnd,
+    pub title: String,
+    pub req: SizeRequest,
+    pub claim: Claim,
+    /// A virtual monitor the app window has already been moved onto, and its manager.
+    pub monitor: Option<(Arc<VdManager>, VMonitor)>,
 }
 
 pub struct OpenedSession {
@@ -109,25 +156,40 @@ pub fn new_session_id() -> String {
 }
 
 impl Session {
-    /// Create the peer connection + capture pipeline for an already-found window.
-    pub async fn open(
-        id: String,
-        app_id: String,
-        hwnd: Hwnd,
-        title: String,
-        width: u32,
-        height: u32,
-        scale: f64,
-        claim: Claim,
-    ) -> Result<OpenedSession> {
-        // Size the app window first so the first captured frame is already right.
-        let (cw, ch) = client_size_for(width, height, scale);
-        let got = tokio::task::spawn_blocking(move || winutil::resize_client(hwnd, cw, ch)).await??;
-        tracing::info!("window {hwnd:#x} client {}x{} (wanted {cw}x{ch}, fitted {})", got.got.0, got.got.1, got.fitted);
-        let window = WindowReport::from(got);
-
-        let (vw, vh) = crate::geom::clamp_video(width, height);
-        let shared = Shared::new(vw, vh);
+    /// Create the peer connection + capture pipeline for an already-found window (and, in
+    /// monitor mode, the monitor it was moved onto).
+    pub async fn open(p: OpenParams) -> Result<OpenedSession> {
+        let OpenParams { id, app_id, hwnd, title, req, claim, monitor } = p;
+        let plan = plan_sizes(&req);
+        let (shared, window, source, monitor_session);
+        if let Some((mgr, mon)) = monitor {
+            // The window is already on the monitor, maximised. Stream the whole monitor.
+            let (vw, vh) = clamp_video(mon.rect.w.max(2) as u32, mon.rect.h.max(2) as u32);
+            let pid = winutil::window_pid(hwnd);
+            shared = Shared::new(vw, vh, InputTarget::Monitor(MonitorTarget::new(hwnd, pid, mon.rect)));
+            window = WindowReport {
+                width: mon.rect.w,
+                height: mon.rect.h,
+                fitted: false,
+                mode: StreamMode::Monitor,
+                dpi: Some(mon.dpi_actual),
+            };
+            source = CaptureSource::Monitor { hmonitor: mon.hmonitor, watch: hwnd };
+            let spec = MonitorSpec { w: mon.rect.w as u32, h: mon.rect.h as u32, dpi_wanted: mon.dpi_wanted };
+            monitor_session = Some(MonitorSession {
+                mgr,
+                state: StdMutex::new(MonState { view_h: spec.h, spec, mon }),
+            });
+        } else {
+            // Size the app window first so the first captured frame is already right.
+            let (cw, ch) = client_size_for(plan.video_w, plan.video_h, plan.window_scale());
+            let got = tokio::task::spawn_blocking(move || winutil::resize_client(hwnd, cw, ch)).await??;
+            tracing::info!("window {hwnd:#x} client {}x{} (wanted {cw}x{ch}, fitted {})", got.got.0, got.got.1, got.fitted);
+            window = WindowReport::from(got);
+            shared = Shared::new(plan.video_w, plan.video_h, InputTarget::Window(hwnd));
+            source = CaptureSource::Window(hwnd);
+            monitor_session = None;
+        }
 
         // --- WebRTC
         let mut media = MediaEngine::default();
@@ -173,7 +235,7 @@ impl Session {
         let input_thread = {
             let shared = shared.clone();
             std::thread::Builder::new().name("penlink-input".into()).spawn(move || {
-                let mut inj = Injector::new(hwnd, shared);
+                let mut inj = Injector::new(shared);
                 while let Ok(cmd) = input_rx.recv() {
                     match cmd {
                         InputCmd::Msg(m) => inj.handle(m),
@@ -268,7 +330,7 @@ impl Session {
         pc.set_local_description(offer).await?;
 
         // --- capture pipeline
-        let handle = pipeline::spawn(hwnd, shared.clone(), track, Handle::current(), ev_tx);
+        let handle = pipeline::spawn(source, shared.clone(), track.clone(), Handle::current(), ev_tx.clone());
         *pipeline_ctl_slot.lock().unwrap() = Some(handle.ctl.clone());
 
         let session = Arc::new(Session {
@@ -287,6 +349,10 @@ impl Session {
             resize_lock: Mutex::new(()),
             claim: StdMutex::new(Some(claim)),
             offer_sdp,
+            monitor: monitor_session,
+            track,
+            ev_tx,
+            ctl_slot: pipeline_ctl_slot,
         });
         Ok(OpenedSession { session, window, ice_rx, events_rx })
     }
@@ -323,21 +389,128 @@ impl Session {
         }
     }
 
-    pub async fn resize(&self, width: u32, height: u32, scale: f64) -> Result<WindowReport> {
+    pub async fn resize(&self, req: SizeRequest) -> Result<WindowReport> {
         let _one_at_a_time = self.resize_lock.lock().await;
-        let (cw, ch) = client_size_for(width, height, scale);
+        let plan = plan_sizes(&req);
+        if self.monitor.is_some() {
+            return self.resize_monitor(&plan).await;
+        }
+        let (cw, ch) = client_size_for(plan.video_w, plan.video_h, plan.window_scale());
         let hwnd = self.hwnd;
         let got = tokio::task::spawn_blocking(move || winutil::resize_client(hwnd, cw, ch)).await??;
         tracing::info!("resized window to client {}x{} (wanted {cw}x{ch}, fitted {})", got.got.0, got.got.1, got.fitted);
-        let (vw, vh) = crate::geom::clamp_video(width, height);
-        self.shared.video_w.store(vw, Ordering::Relaxed);
-        self.shared.video_h.store(vh, Ordering::Relaxed);
+        self.shared.video_w.store(plan.video_w, Ordering::Relaxed);
+        self.shared.video_h.store(plan.video_h, Ordering::Relaxed);
         self.request_keyframe();
         Ok(got.into())
     }
 
-    /// Stop everything. Does not touch the app itself.
+    /// Monitor mode. Same width and not taller than the monitor (the phone keyboard going up or
+    /// down): only the streamed part and the window change. Anything else (rotation, quality)
+    /// gives the monitor a new size.
+    async fn resize_monitor(&self, plan: &crate::sizing::SizePlan) -> Result<WindowReport> {
+        let ms = self.monitor.as_ref().expect("monitor mode");
+        let (mon, spec, cur_view_h) = {
+            let st = ms.state.lock().unwrap();
+            (st.mon.clone(), st.spec, st.view_h)
+        };
+        let action = decide_resize(spec, plan);
+        tracing::info!("resize {}x{} dpi {} -> {action:?} (monitor {}x{}, view {cur_view_h})", plan.video_w, plan.video_h, plan.dpi_pct, spec.w, spec.h);
+        let hwnd = self.hwnd;
+        let mgr = ms.mgr.clone();
+        let (mon, spec, view_h) = match action {
+            ResizeAction::Reconfigure { w, h } => {
+                // The capture must not see the monitor disappear: stop it first.
+                self.stop_pipeline().await;
+                let dpi = plan.dpi_pct;
+                let m2 = mon.clone();
+                let new_mon = match tokio::task::spawn_blocking(move || -> Result<VMonitor> {
+                    let m = mgr.reconfigure(&m2, w, h, dpi)?;
+                    winutil::place_maximized_on(hwnd, m.rect)?;
+                    Ok(m)
+                })
+                .await?
+                {
+                    Ok(m) => m,
+                    Err(e) => {
+                        let _ = self.ev_tx.send(PipelineEvent::Error(format!("virtual monitor: {e}")));
+                        return Err(e);
+                    }
+                };
+                let spec = MonitorSpec { w: new_mon.rect.w as u32, h: new_mon.rect.h as u32, dpi_wanted: dpi };
+                (new_mon, spec, spec.h)
+            }
+            ResizeAction::InPlace { view_h, dpi_changed } => {
+                let mut mon = mon;
+                let mut spec = spec;
+                if dpi_changed {
+                    let (m2, dpi) = (mon.clone(), plan.dpi_pct);
+                    let mgr = mgr.clone();
+                    mon = tokio::task::spawn_blocking(move || mgr.set_dpi(&m2, dpi)).await??;
+                    spec.dpi_wanted = plan.dpi_pct;
+                }
+                let view_h = view_h.min(spec.h);
+                if view_h != cur_view_h || dpi_changed {
+                    let m2 = mon.clone();
+                    let spec_h = spec.h;
+                    tokio::task::spawn_blocking(move || -> Result<()> {
+                        if view_h >= spec_h {
+                            winutil::place_maximized_on(hwnd, m2.rect)
+                        } else {
+                            winutil::place_view_on(hwnd, Rect::new(m2.rect.x, m2.rect.y, m2.rect.w, view_h as i32)).map(|_| ())
+                        }
+                    })
+                    .await??;
+                }
+                (mon, spec, view_h)
+            }
+        };
+        let monitor_rect = mon.rect;
+        let view = Rect::new(monitor_rect.x, monitor_rect.y, monitor_rect.w, view_h as i32);
+        if let InputTarget::Monitor(t) = &self.shared.target {
+            t.set(monitor_rect, view);
+        }
+        let (vw, vh) = clamp_video(view.w.max(2) as u32, view.h.max(2) as u32);
+        self.shared.video_w.store(vw, Ordering::Relaxed);
+        self.shared.video_h.store(vh, Ordering::Relaxed);
+        let hmonitor = mon.hmonitor;
+        let report = WindowReport {
+            width: view.w,
+            height: view.h,
+            fitted: false,
+            mode: StreamMode::Monitor,
+            dpi: Some(mon.dpi_actual),
+        };
+        *ms.state.lock().unwrap() = MonState { mon, spec, view_h };
+        if matches!(action, ResizeAction::Reconfigure { .. }) {
+            self.start_pipeline(CaptureSource::Monitor { hmonitor, watch: hwnd });
+        }
+        self.request_keyframe();
+        Ok(report)
+    }
+
+    async fn stop_pipeline(&self) {
+        let pipeline = self.pipeline.lock().unwrap().take();
+        *self.ctl_slot.lock().unwrap() = None;
+        let _ = tokio::task::spawn_blocking(move || drop(pipeline)).await;
+    }
+
+    fn start_pipeline(&self, source: CaptureSource) {
+        if self.closed.load(Ordering::SeqCst) {
+            return;
+        }
+        let handle = pipeline::spawn(source, self.shared.clone(), self.track.clone(), Handle::current(), self.ev_tx.clone());
+        *self.ctl_slot.lock().unwrap() = Some(handle.ctl.clone());
+        *self.pipeline.lock().unwrap() = Some(handle);
+    }
+
+    /// Stop everything. Does not touch the app itself. A virtual monitor is removed.
     pub async fn close(&self) {
+        self.close_with(CloseKind::Closed).await;
+    }
+
+    /// Like [`close`](Self::close); `PhoneGone` keeps a virtual monitor for the grace period.
+    pub async fn close_with(&self, kind: CloseKind) {
         if self.closed.swap(true, Ordering::SeqCst) {
             return;
         }
@@ -352,8 +525,23 @@ impl Session {
         })
         .await;
         let _ = self.pc.close().await;
+        if let Some(ms) = &self.monitor {
+            let guid = ms.state.lock().unwrap().mon.guid;
+            let mgr = ms.mgr.clone();
+            let hwnd = self.hwnd;
+            let _ = tokio::task::spawn_blocking(move || match kind {
+                CloseKind::PhoneGone if winutil::is_window(hwnd) => mgr.orphan(&guid, std::time::Instant::now(), GRACE),
+                _ => mgr.release(&guid),
+            })
+            .await;
+        }
         // Capture and input threads are gone: the window may be opened again.
         self.claim.lock().unwrap().take();
+    }
+
+    /// Whether this session streams a virtual monitor.
+    pub fn is_monitor(&self) -> bool {
+        self.monitor.is_some()
     }
 }
 

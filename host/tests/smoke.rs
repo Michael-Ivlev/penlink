@@ -21,6 +21,7 @@ async fn start_server() -> RunningServer {
         store_path: Some(dir.join("host.json")),
         host_name: Some("SMOKEHOST".into()),
         print_code: false,
+        virtual_monitors: false,
         ..Config::default()
     };
     server::start(cfg).await.expect("server starts")
@@ -210,7 +211,15 @@ async fn open_notepad() {
     assert_eq!(opened["type"], "opened", "{opened}");
     let sid = opened["sessionId"].as_str().unwrap().to_string();
     println!("opened: {opened}");
-    let offer = next_json(&mut ws, 15).await;
+    // opened -> (title) -> window -> offer
+    let mut offer = next_json(&mut ws, 15).await;
+    while offer["type"] == "title" || offer["type"] == "window" {
+        if offer["type"] == "window" {
+            assert_eq!(offer["mode"], "window", "no virtual monitor in this test: {offer}");
+            assert!(offer.get("dpi").is_none());
+        }
+        offer = next_json(&mut ws, 15).await;
+    }
     assert_eq!(offer["type"], "offer");
     assert_eq!(offer["sessionId"], sid);
     let sdp = offer["sdp"].as_str().unwrap();

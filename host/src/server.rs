@@ -5,7 +5,9 @@ use crate::launcher::{self, Target};
 use crate::netfilter;
 use crate::pipeline::PipelineEvent;
 use crate::protocol::*;
-use crate::session::{new_session_id, Session};
+use crate::session::{new_session_id, CloseKind, OpenParams, Session};
+use crate::sizing::{plan_sizes, SizePlan, SizeRequest};
+use crate::vdmanager::{VMonitor, VdManager};
 use crate::store::{PairCheck, PairingCode, TokenStore};
 use anyhow::{Context, Result};
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
@@ -41,6 +43,8 @@ pub struct Config {
     pub host_name: Option<String>,
     /// Print the pairing code on the console.
     pub print_code: bool,
+    /// Use the SudoVDA driver (one virtual monitor per opened app) when it is installed.
+    pub virtual_monitors: bool,
 }
 
 impl Default for Config {
@@ -53,6 +57,7 @@ impl Default for Config {
             store_path: None,
             host_name: None,
             print_code: true,
+            virtual_monitors: true,
         }
     }
 }
@@ -69,6 +74,8 @@ pub struct AppState {
     pairing: Mutex<Option<PairingCode>>,
     catalog: Mutex<Catalog>,
     icons: Mutex<HashMap<String, Vec<u8>>>,
+    /// Virtual monitors; `None` when the driver is not installed (window capture is used).
+    vd: Option<Arc<VdManager>>,
 }
 
 impl AppState {
@@ -132,6 +139,7 @@ pub struct RunningServer {
     pub state: Arc<AppState>,
     shutdown: Option<oneshot::Sender<()>>,
     join: Option<tokio::task::JoinHandle<()>>,
+    reaper: Option<tokio::task::JoinHandle<()>>,
 }
 
 impl RunningServer {
@@ -147,6 +155,22 @@ impl RunningServer {
         if let Some(j) = self.join.take() {
             let _ = j.await;
         }
+        self.remove_virtual_monitors().await;
+    }
+
+    /// Remove every virtual monitor now (their windows go back to the main monitor).
+    pub async fn remove_virtual_monitors(&self) {
+        if let Some(r) = self.reaper.as_ref() {
+            r.abort();
+        }
+        if let Some(vd) = self.state.vd.clone() {
+            let _ = tokio::task::spawn_blocking(move || vd.release_all()).await;
+        }
+    }
+
+    /// Whether virtual monitors are available (the driver is installed and usable).
+    pub fn has_virtual_monitors(&self) -> bool {
+        self.state.vd.is_some()
     }
 
     /// Wait until the server task ends (it normally never does).
@@ -167,6 +191,7 @@ pub async fn start(cfg: Config) -> Result<RunningServer> {
         .await
         .with_context(|| format!("cannot listen on {}:{}", cfg.bind, cfg.port))?;
     let addr = listener.local_addr()?;
+    let vd = if cfg.virtual_monitors { tokio::task::spawn_blocking(crate::vdisplay::start_manager).await.ok().flatten() } else { None };
     let state = Arc::new(AppState {
         cfg,
         host_name,
@@ -174,6 +199,17 @@ pub async fn start(cfg: Config) -> Result<RunningServer> {
         pairing: Mutex::new(None),
         catalog: Mutex::new(Catalog { apps: Vec::new(), at: None }),
         icons: Mutex::new(HashMap::new()),
+        vd: vd.clone(),
+    });
+    // Monitors kept for a phone that never came back are removed after their grace period.
+    let reaper = vd.map(|vd| {
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(Duration::from_secs(5)).await;
+                let vd = vd.clone();
+                let _ = tokio::task::spawn_blocking(move || vd.reap(Instant::now())).await;
+            }
+        })
     });
     if need_code {
         state.new_code(true).await;
@@ -207,7 +243,7 @@ pub async fn start(cfg: Config) -> Result<RunningServer> {
         }
     });
     tracing::info!("listening on {addr}");
-    Ok(RunningServer { addr, state, shutdown: Some(tx), join: Some(join) })
+    Ok(RunningServer { addr, state, shutdown: Some(tx), join: Some(join), reaper })
 }
 
 // ---------------------------------------------------------------------------------------
@@ -379,8 +415,10 @@ async fn ws_loop(socket: WebSocket, st: Arc<AppState>) {
             }
         };
         match cm {
-            ClientMsg::Open { app_id, width, height, scale, attach } => {
-                tokio::spawn(do_open(st.clone(), out_tx.clone(), sessions.clone(), app_id, width, height, scale, attach));
+            ClientMsg::Open { app_id, width, height, scale, attach, quality, ui_scale } => {
+                let req = SizeRequest::from_wire(width, height, scale, quality.as_deref(), ui_scale);
+                let want_monitor = SizeRequest::wants_monitor(quality.as_deref(), ui_scale);
+                tokio::spawn(do_open(st.clone(), out_tx.clone(), sessions.clone(), app_id, req, want_monitor, attach));
             }
             ClientMsg::Answer { session_id, sdp } => {
                 if let Some(s) = get_session(&sessions, &session_id).await {
@@ -404,21 +442,21 @@ async fn ws_loop(socket: WebSocket, st: Arc<AppState>) {
                     unknown_session(&out_tx, &session_id);
                 }
             }
-            ClientMsg::Resize { session_id, width, height, scale } => {
+            ClientMsg::Resize { session_id, width, height, scale, quality, ui_scale } => {
                 if let Some(s) = get_session(&sessions, &session_id).await {
-                    match s.resize(width, height, scale).await {
-                        Ok(w) => {
-                            let _ = out_tx.send(ServerMsg::Window {
-                                session_id: s.id.clone(),
-                                width: w.width,
-                                height: w.height,
-                                fitted: w.fitted,
-                            });
+                    let req = SizeRequest::from_wire(width, height, scale, quality.as_deref(), ui_scale);
+                    let out_tx = out_tx.clone();
+                    // A monitor change can take seconds: do not stall the other messages.
+                    tokio::spawn(async move {
+                        match s.resize(req).await {
+                            Ok(w) => {
+                                let _ = out_tx.send(window_msg(&s.id, &w));
+                            }
+                            Err(e) => {
+                                let _ = out_tx.send(ServerMsg::Error { message: format!("resize failed: {e}") });
+                            }
                         }
-                        Err(e) => {
-                            let _ = out_tx.send(ServerMsg::Error { message: format!("resize failed: {e}") });
-                        }
-                    }
+                    });
                 } else {
                     unknown_session(&out_tx, &session_id);
                 }
@@ -443,11 +481,12 @@ async fn ws_loop(socket: WebSocket, st: Arc<AppState>) {
         }
     }
 
-    // Phone went away: stop every session (apps stay open).
+    // Phone went away: stop every session (apps stay open). Virtual monitors stay for the
+    // grace period so the phone can come back and attach to them.
     sessions.pending.lock().await.clear();
     let all: Vec<Arc<Session>> = sessions.ready.lock().await.drain().map(|(_, s)| s).collect();
     for s in all {
-        s.close().await;
+        s.close_with(CloseKind::PhoneGone).await;
     }
     drop(out_tx);
     let _ = writer.await;
@@ -468,14 +507,79 @@ async fn resolve_target(st: &AppState, app_id: &str) -> Option<Target> {
     st.find_app(app_id).await.map(|a| Target::from_app(&a))
 }
 
+fn window_msg(session_id: &str, w: &crate::session::WindowReport) -> ServerMsg {
+    ServerMsg::Window { session_id: session_id.to_string(), width: w.width, height: w.height, fitted: w.fitted, mode: w.mode, dpi: w.dpi }
+}
+
+/// A new virtual monitor for `plan`, or `None` (with the reason logged) so the caller falls
+/// back to window capture.
+async fn create_monitor(vd: &Arc<VdManager>, plan: &SizePlan) -> Option<VMonitor> {
+    let (vd, w, h, dpi) = (vd.clone(), plan.video_w, plan.video_h, plan.dpi_pct);
+    match tokio::task::spawn_blocking(move || vd.create(w, h, dpi)).await {
+        Ok(Ok(m)) => {
+            tracing::info!(
+                "virtual monitor {} {}x{} at {},{} dpi {}% (asked {}%)",
+                m.gdi_name, m.rect.w, m.rect.h, m.rect.x, m.rect.y, m.dpi_actual, m.dpi_wanted
+            );
+            Some(m)
+        }
+        Ok(Err(e)) => {
+            tracing::warn!("virtual monitor failed, using window capture: {e:#}");
+            None
+        }
+        Err(e) => {
+            tracing::warn!("virtual monitor task failed: {e}");
+            None
+        }
+    }
+}
+
+/// A phone that reattaches takes over the monitor kept for it (resized if its screen is
+/// different now), or gets a new one.
+async fn adopt_or_create(vd: &Arc<VdManager>, hwnd: isize, plan: &SizePlan) -> Option<VMonitor> {
+    let (vd2, plan2) = (vd.clone(), *plan);
+    let adopted = tokio::task::spawn_blocking(move || -> Option<VMonitor> {
+        let m = vd2.adopt(hwnd)?;
+        let fitted = if (m.rect.w, m.rect.h) != (plan2.video_w as i32, plan2.video_h as i32) {
+            vd2.reconfigure(&m, plan2.video_w, plan2.video_h, plan2.dpi_pct)
+        } else if m.dpi_wanted != plan2.dpi_pct {
+            vd2.set_dpi(&m, plan2.dpi_pct)
+        } else {
+            Ok(m)
+        };
+        match fitted {
+            Ok(m) => Some(m),
+            Err(e) => {
+                tracing::warn!("kept virtual monitor could not be reused: {e:#}");
+                None
+            }
+        }
+    })
+    .await
+    .ok()
+    .flatten();
+    match adopted {
+        Some(m) => {
+            tracing::info!("phone is back: reusing virtual monitor {}", m.gdi_name);
+            Some(m)
+        }
+        None => create_monitor(vd, plan).await,
+    }
+}
+
+async fn release_monitor(vd: &Arc<VdManager>, m: &VMonitor) {
+    let (vd, guid) = (vd.clone(), m.guid);
+    let _ = tokio::task::spawn_blocking(move || vd.release(&guid)).await;
+}
+
+#[allow(clippy::too_many_arguments)]
 async fn do_open(
     st: Arc<AppState>,
     out: UnboundedSender<ServerMsg>,
     sessions: Sessions,
     app_id: String,
-    width: u32,
-    height: u32,
-    scale: f64,
+    req: SizeRequest,
+    want_monitor: bool,
     attach: bool,
 ) {
     // Accept first: the phone gets a session id (and a pending tab) before anything slow
@@ -486,6 +590,7 @@ async fn do_open(
     let fail = |reason: String| {
         let _ = out.send(ServerMsg::Closed { session_id: session_id.clone(), reason });
     };
+    let (width, height) = (req.width, req.height);
     if !(64..=8192).contains(&width) || !(64..=8192).contains(&height) {
         sessions.pending.lock().await.remove(&session_id);
         fail(format!("error: bad size {width}x{height}"));
@@ -496,38 +601,90 @@ async fn do_open(
         fail(format!("error: unknown app {app_id}"));
         return;
     };
-    tracing::info!("open {:?} ({app_id}) {width}x{height} @{scale} -> session {session_id}", target.name);
+    let plan = plan_sizes(&req);
+    let vd = if want_monitor { st.vd.clone() } else { None };
+    tracing::info!(
+        "open {:?} ({app_id}) {width}x{height} {} ui {}% monitor={} -> session {session_id}",
+        target.name,
+        req.quality.as_str(),
+        req.ui_scale,
+        vd.is_some()
+    );
+
+    // A new app gets its monitor first, so the window can be moved there as soon as it
+    // appears. A reattach looks for the window first (a kept monitor is found through it).
+    let mut monitor: Option<VMonitor> = None;
+    if let (Some(vd), false) = (&vd, attach) {
+        monitor = create_monitor(vd, &plan).await;
+    }
 
     let found = tokio::task::spawn_blocking(move || launcher::launch_and_find(&target, LAUNCH_TIMEOUT, attach)).await;
     let found = match found {
         Ok(Ok(f)) => f,
-        Ok(Err(e)) => {
-            tracing::warn!("open failed: {e}");
-            if sessions.pending.lock().await.remove(&session_id) {
-                // A reattach that finds no window means the app is gone: not an error.
-                fail(if attach && e.to_string() == "app exited" { "app exited".to_string() } else { format!("error: {e}") });
+        other => {
+            let msg = match other {
+                Ok(Err(e)) => {
+                    tracing::warn!("open failed: {e}");
+                    // A reattach that finds no window means the app is gone: not an error.
+                    if attach && e.to_string() == "app exited" { "app exited".to_string() } else { format!("error: {e}") }
+                }
+                Err(e) => format!("error: {e}"),
+                Ok(Ok(_)) => unreachable!(),
+            };
+            if let (Some(vd), Some(m)) = (&vd, &monitor) {
+                release_monitor(vd, m).await;
             }
-            return;
-        }
-        Err(e) => {
             if sessions.pending.lock().await.remove(&session_id) {
-                fail(format!("error: {e}"));
+                fail(msg);
             }
             return;
         }
     };
     if !sessions.pending.lock().await.contains(&session_id) {
         tracing::info!("session {session_id} was closed while launching");
+        if let (Some(vd), Some(m)) = (&vd, &monitor) {
+            release_monitor(vd, m).await;
+        }
         return; // phone closed the tab (or went away); the app stays open
     }
     if !found.title.is_empty() {
         let _ = out.send(ServerMsg::Title { session_id: session_id.clone(), title: found.title.clone() });
     }
 
-    let opened = match Session::open(session_id.clone(), app_id.clone(), found.hwnd, found.title.clone(), width, height, scale, found.claim).await {
+    // Move the window onto the monitor and maximise it; any failure falls back to window capture.
+    if let Some(vd) = &vd {
+        if monitor.is_none() && attach {
+            monitor = adopt_or_create(vd, found.hwnd, &plan).await;
+        }
+        if let Some(m) = monitor.clone() {
+            let (hwnd, rect) = (found.hwnd, m.rect);
+            vd.bind(&m.guid, hwnd, &app_id);
+            let placed = tokio::task::spawn_blocking(move || crate::winutil::place_maximized_on(hwnd, rect)).await;
+            if !matches!(placed, Ok(Ok(()))) {
+                tracing::warn!("could not move the window onto the virtual monitor ({placed:?}); using window capture");
+                release_monitor(vd, &m).await;
+                monitor = None;
+            }
+        }
+    }
+
+    let opened = match Session::open(OpenParams {
+        id: session_id.clone(),
+        app_id: app_id.clone(),
+        hwnd: found.hwnd,
+        title: found.title.clone(),
+        req,
+        claim: found.claim,
+        monitor: vd.clone().zip(monitor.clone()),
+    })
+    .await
+    {
         Ok(o) => o,
         Err(e) => {
             tracing::warn!("session setup failed: {e:#}");
+            if let (Some(vd), Some(m)) = (&vd, &monitor) {
+                release_monitor(vd, m).await;
+            }
             if sessions.pending.lock().await.remove(&session_id) {
                 fail(format!("error: {e}"));
             }
@@ -541,8 +698,7 @@ async fn do_open(
     }
     sessions.ready.lock().await.insert(session_id.clone(), session.clone());
 
-    let w = opened.window;
-    let _ = out.send(ServerMsg::Window { session_id: session_id.clone(), width: w.width, height: w.height, fitted: w.fitted });
+    let _ = out.send(window_msg(&session_id, &opened.window));
     let _ = out.send(ServerMsg::Offer { session_id: session_id.clone(), sdp: session.offer_sdp.clone() });
 
     // Local ICE candidates (trickle) - only after the offer went out.

@@ -6,6 +6,10 @@
 //!
 //! Open it through the host with the appId `exe:<full path>\testpad.exe <log path>`.
 
+//! It also has a menu ("Menu": "Say hello", "Open dialog...") and an "Open dialog" button; the
+//! dialog is a real MessageBox owned by the window. They exist to prove that menus and dialogs
+//! (separate top-level windows) show up in a virtual-monitor stream and take input.
+
 use std::io::Write;
 use std::sync::OnceLock;
 use windows::core::{w, PCWSTR};
@@ -85,6 +89,28 @@ unsafe extern "system" fn edit_proc(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -
 }
 
 static mut EDIT: HWND = HWND(std::ptr::null_mut());
+static mut BUTTON: HWND = HWND(std::ptr::null_mut());
+
+const ID_HELLO: usize = 1001;
+const ID_DIALOG: usize = 1002;
+const ID_EXIT: usize = 1003;
+const ID_BUTTON: usize = 1004;
+
+fn layout(h: HWND) {
+    unsafe {
+        let mut r = RECT::default();
+        let _ = GetClientRect(h, &mut r);
+        let dpi = windows::Win32::UI::HiDpi::GetDpiForWindow(h).max(96) as i32;
+        let bh = 40 * dpi / 96;
+        let (e, b) = (EDIT, BUTTON);
+        if !b.0.is_null() {
+            let _ = MoveWindow(b, 0, 0, r.right, bh, true);
+        }
+        if !e.0.is_null() {
+            let _ = MoveWindow(e, 0, bh, r.right, (r.bottom - bh).max(1), true);
+        }
+    }
+}
 
 unsafe extern "system" fn main_proc(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
     match msg {
@@ -92,11 +118,31 @@ unsafe extern "system" fn main_proc(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -
             let mut r = RECT::default();
             let _ = unsafe { GetClientRect(h, &mut r) };
             log(&format!("SIZE client={}x{}", r.right, r.bottom));
+            layout(h);
+            LRESULT(0)
+        }
+        WM_DPICHANGED => {
+            log(&format!("DPI {}", wp.0 & 0xffff));
+            let rc = unsafe { &*(lp.0 as *const RECT) };
             unsafe {
-                let e = EDIT;
-                if !e.0.is_null() {
-                    let _ = MoveWindow(e, 0, 0, r.right, r.bottom, true);
+                let _ = SetWindowPos(h, None, rc.left, rc.top, rc.right - rc.left, rc.bottom - rc.top, SWP_NOZORDER | SWP_NOACTIVATE);
+            }
+            LRESULT(0)
+        }
+        WM_COMMAND => {
+            match wp.0 & 0xffff {
+                ID_HELLO => log("MENU hello"),
+                ID_EXIT => unsafe {
+                    let _ = DestroyWindow(h);
+                },
+                ID_DIALOG | ID_BUTTON => {
+                    log("DIALOG shown");
+                    unsafe {
+                        MessageBoxW(Some(h), w!("Penlink testpad dialog"), w!("Testpad dialog"), MB_OK);
+                    }
+                    log("DIALOG closed");
                 }
+                _ => {}
             }
             LRESULT(0)
         }
@@ -149,6 +195,29 @@ fn main() {
             None,
         )
         .unwrap();
+        let menu = CreateMenu().unwrap();
+        let sub_menu = CreatePopupMenu().unwrap();
+        let _ = AppendMenuW(sub_menu, MF_STRING, ID_HELLO, w!("Say hello"));
+        let _ = AppendMenuW(sub_menu, MF_STRING, ID_DIALOG, w!("Open dialog..."));
+        let _ = AppendMenuW(sub_menu, MF_STRING, ID_EXIT, w!("Exit"));
+        let _ = AppendMenuW(menu, MF_POPUP, sub_menu.0 as usize, w!("Menu"));
+        let _ = SetMenu(hwnd, Some(menu));
+        let button = CreateWindowExW(
+            WINDOW_EX_STYLE(0),
+            w!("BUTTON"),
+            w!("Open dialog"),
+            WS_CHILD | WS_VISIBLE | WINDOW_STYLE(BS_PUSHBUTTON as u32),
+            0,
+            0,
+            100,
+            40,
+            Some(hwnd),
+            Some(HMENU(ID_BUTTON as *mut std::ffi::c_void)),
+            Some(inst.into()),
+            None,
+        )
+        .unwrap();
+        BUTTON = button;
         let style = WS_CHILD | WS_VISIBLE | WS_VSCROLL | WINDOW_STYLE((ES_MULTILINE | ES_AUTOVSCROLL | ES_WANTRETURN) as u32);
         let edit = CreateWindowExW(
             WINDOW_EX_STYLE(0),
@@ -171,10 +240,9 @@ fn main() {
             Default::default(), Default::default(), w!("Consolas"),
         );
         SendMessageW(edit, WM_SETFONT, Some(WPARAM(font.0 as usize)), Some(LPARAM(1)));
+        SendMessageW(button, WM_SETFONT, Some(WPARAM(font.0 as usize)), Some(LPARAM(1)));
         OLD_EDIT_PROC = SetWindowLongPtrW(edit, GWLP_WNDPROC, edit_proc as usize as isize);
-        let mut r = RECT::default();
-        let _ = GetClientRect(hwnd, &mut r);
-        let _ = MoveWindow(edit, 0, 0, r.right, r.bottom, true);
+        layout(hwnd);
         log("START testpad");
         let mut msg = MSG::default();
         while GetMessageW(&mut msg, None, 0, 0).as_bool() {

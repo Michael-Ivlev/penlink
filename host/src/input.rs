@@ -3,13 +3,16 @@
 //! The decision logic (which pointer flags to send for which phone event) is pure and unit
 //! tested; the `Injector` applies it with Win32.
 
-use crate::geom::map_to_client;
+use crate::geom::{map_to_client, Rect};
+use crate::sizing::{foreground_accepts, rect_center, rect_contains};
 use crate::protocol::{Button, InputMsg, KeyAction, MouseAction, PenAction, TouchAction};
 use crate::vk::{is_extended_key, us_char, VK_RETURN, VK_TAB};
-use crate::winutil::{bring_to_front, client_rect_screen, is_foreground, is_window, Hwnd};
+use crate::winutil::{
+    bring_to_front, client_rect_screen, foreground_info, is_foreground, is_window, last_active_popup, window_rect, Hwnd,
+};
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::atomic::{AtomicU32, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 use windows::Win32::Foundation::{HANDLE, HWND, POINT, RECT};
 use windows::Win32::UI::Controls::{
     CreateSyntheticPointerDevice, DestroySyntheticPointerDevice, HSYNTHETICPOINTERDEVICE,
@@ -248,15 +251,105 @@ impl TouchState {
 // ---------------------------------------------------------------------------------------
 // Win32 application
 
-/// State shared between the session and its input thread.
+/// A virtual monitor shown to the phone: the app's window lives on it, and what the phone
+/// sees is the monitor (or its top rows while the phone keyboard is up).
+pub struct MonitorTarget {
+    pub app_hwnd: Hwnd,
+    pub app_pid: u32,
+    /// The whole monitor, in screen coordinates.
+    pub monitor: RwLock<Rect>,
+    /// The streamed part of it, in screen coordinates.
+    pub view: RwLock<Rect>,
+}
+
+impl MonitorTarget {
+    pub fn new(app_hwnd: Hwnd, app_pid: u32, monitor: Rect) -> Self {
+        Self { app_hwnd, app_pid, monitor: RwLock::new(monitor), view: RwLock::new(monitor) }
+    }
+
+    pub fn monitor_rect(&self) -> Rect {
+        *self.monitor.read().unwrap()
+    }
+
+    pub fn view_rect(&self) -> Rect {
+        *self.view.read().unwrap()
+    }
+
+    pub fn set(&self, monitor: Rect, view: Rect) {
+        *self.monitor.write().unwrap() = monitor;
+        *self.view.write().unwrap() = view;
+    }
+
+    /// The streamed part relative to the monitor's top-left (the capture crop).
+    pub fn crop(&self) -> Rect {
+        let (m, v) = (self.monitor_rect(), self.view_rect());
+        Rect::new(v.x - m.x, v.y - m.y, v.w, v.h)
+    }
+}
+
+/// What the phone sees and controls.
+pub enum InputTarget {
+    /// One window (its client area).
+    Window(Hwnd),
+    Monitor(MonitorTarget),
+}
+
+impl InputTarget {
+    /// The app's main window.
+    pub fn main_hwnd(&self) -> Hwnd {
+        match self {
+            InputTarget::Window(h) => *h,
+            InputTarget::Monitor(m) => m.app_hwnd,
+        }
+    }
+
+    /// The streamed area in screen coordinates.
+    pub fn area(&self) -> Option<Rect> {
+        match self {
+            InputTarget::Window(h) => client_rect_screen(*h),
+            InputTarget::Monitor(m) => Some(m.view_rect()),
+        }
+    }
+
+    /// May input be injected right now? Window: the window is in front. Monitor: the
+    /// foreground window belongs to the app (its process, or a dialog it owns) and is on the
+    /// session's monitor, so a window the user switched to is never typed into.
+    pub fn has_focus(&self) -> bool {
+        match self {
+            InputTarget::Window(h) => is_foreground(*h),
+            InputTarget::Monitor(m) => {
+                let Some(fg) = foreground_info() else { return false };
+                let in_session = fg.pid == m.app_pid || fg.root_owner == m.app_hwnd;
+                foreground_accepts(in_session, Some(fg.rect), m.monitor_rect())
+            }
+        }
+    }
+
+    /// Bring the app to the front (a dialog of it, if one is open).
+    pub fn focus(&self) {
+        match self {
+            InputTarget::Window(h) => bring_to_front(*h),
+            InputTarget::Monitor(m) => {
+                // Only while the app is still on its monitor: never drag a window the user
+                // moved away back into focus on the real desktop.
+                if window_rect(m.app_hwnd).is_some_and(|r| rect_contains(m.monitor_rect(), rect_center(r))) {
+                    bring_to_front(last_active_popup(m.app_hwnd));
+                }
+            }
+        }
+    }
+}
+
+/// State shared between the session, its capture pipeline and its input thread.
 pub struct Shared {
     pub video_w: AtomicU32,
     pub video_h: AtomicU32,
+    pub target: InputTarget,
 }
 
 impl Shared {
-    pub fn new(w: u32, h: u32) -> Arc<Self> {
-        Arc::new(Self { video_w: AtomicU32::new(w), video_h: AtomicU32::new(h) })
+    pub fn new(w: u32, h: u32, target: InputTarget) -> Arc<Self> {
+        Arc::new(Self { video_w: AtomicU32::new(w), video_h: AtomicU32::new(h), target })
     }
     pub fn video(&self) -> (i32, i32) {
         (self.video_w.load(Ordering::Relaxed) as i32, self.video_h.load(Ordering::Relaxed) as i32)
@@ -272,7 +365,6 @@ impl Drop for SafeDevice {
 }
 
 pub struct Injector {
-    hwnd: Hwnd,
     shared: Arc<Shared>,
     pen_dev: Option<SafeDevice>,
     touch_dev: Option<SafeDevice>,
@@ -332,7 +424,7 @@ fn send(inputs: &[INPUT]) {
 }
 
 impl Injector {
-    pub fn new(hwnd: Hwnd, shared: Arc<Shared>) -> Self {
+    pub fn new(shared: Arc<Shared>) -> Self {
         let pen_dev = unsafe { CreateSyntheticPointerDevice(PT_PEN, 1, POINTER_FEEDBACK_DEFAULT) }
             .map(SafeDevice)
             .map_err(|e| tracing::warn!("pen injection unavailable: {e}"))
@@ -342,7 +434,6 @@ impl Injector {
             .map_err(|e| tracing::warn!("touch injection unavailable: {e}"))
             .ok();
         Self {
-            hwnd,
             shared,
             pen_dev,
             touch_dev,
@@ -361,27 +452,27 @@ impl Injector {
     /// when it is not: SendInput goes to whatever has focus, so input is dropped rather than
     /// typed into some other app the user switched to.
     fn ensure_focus(&mut self) -> bool {
-        if is_foreground(self.hwnd) {
+        if self.shared.target.has_focus() {
             return true;
         }
         if self.last_focus_try.elapsed() <= std::time::Duration::from_millis(250) {
             return false;
         }
         self.last_focus_try = std::time::Instant::now();
-        bring_to_front(self.hwnd);
+        self.shared.target.focus();
         for _ in 0..5 {
-            if is_foreground(self.hwnd) {
+            if self.shared.target.has_focus() {
                 return true;
             }
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
-        tracing::debug!("window {:#x} is not in the foreground; input dropped", self.hwnd);
+        tracing::debug!("window {:#x} is not in the foreground; input dropped", self.shared.target.main_hwnd());
         false
     }
 
     /// Normalised video coords -> screen pixel position.
     fn to_screen(&self, nx: f64, ny: f64) -> Option<(i32, i32)> {
-        let cr = client_rect_screen(self.hwnd)?;
+        let cr = self.shared.target.area()?;
         let (vw, vh) = self.shared.video();
         let (px, py) = map_to_client(nx, ny, vw, vh, cr.w, cr.h);
         Some((cr.x + px, cr.y + py))
@@ -389,7 +480,7 @@ impl Injector {
 
     pub fn handle(&mut self, msg: InputMsg) {
         tracing::debug!("input {msg:?}");
-        if !is_window(self.hwnd) {
+        if !is_window(self.shared.target.main_hwnd()) {
             return;
         }
         match msg {
@@ -441,7 +532,7 @@ impl Injector {
     }
 
     fn mrel(&mut self, dx: f64, dy: f64) {
-        let Some(cr) = client_rect_screen(self.hwnd) else { return };
+        let Some(cr) = self.shared.target.area() else { return };
         let (vw, vh) = self.shared.video();
         if vw <= 0 || vh <= 0 || cr.w <= 0 || cr.h <= 0 {
             return;
@@ -473,7 +564,7 @@ impl Injector {
             return;
         }
         // The wheel goes to the window under the cursor: make sure it is inside our client area.
-        if let Some(cr) = client_rect_screen(self.hwnd) {
+        if let Some(cr) = self.shared.target.area() {
             let mut p = POINT::default();
             unsafe {
                 if GetCursorPos(&mut p).is_ok()

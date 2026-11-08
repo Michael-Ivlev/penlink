@@ -2,6 +2,7 @@
 
 pub mod apps;
 pub mod crash;
+pub mod driver_install;
 pub mod encode;
 pub mod frame;
 pub mod geom;

@@ -22,6 +22,18 @@ struct Cli {
     /// Do not use virtual monitors even if the SudoVDA driver is installed (window capture only).
     #[arg(long)]
     no_vdisplay: bool,
+    /// Ask for permission to install the virtual display driver now, even if you declined before.
+    #[arg(long)]
+    install_driver_now: bool,
+    /// Remove the virtual display driver and its certificates (asks for permission).
+    #[arg(long)]
+    uninstall_driver: bool,
+    /// Internal: elevated driver install from this folder.
+    #[arg(long, hide = true, value_name = "DIR")]
+    install_driver: Option<std::path::PathBuf>,
+    /// Internal: elevated driver removal using the tools in this folder.
+    #[arg(long, hide = true, value_name = "DIR")]
+    elevated_uninstall: Option<std::path::PathBuf>,
     /// Deliberately fault, to check that the crash report works.
     #[arg(long, hide = true)]
     selftest_crash: bool,
@@ -33,6 +45,16 @@ struct Cli {
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
+    // Elevated helper modes: do the one job and exit with its code.
+    if let Some(dir) = &cli.install_driver {
+        std::process::exit(penlink_host::driver_install::run_install(dir));
+    }
+    if let Some(dir) = &cli.elevated_uninstall {
+        std::process::exit(penlink_host::driver_install::run_uninstall(dir));
+    }
+    if cli.uninstall_driver {
+        std::process::exit(penlink_host::driver_install::uninstall_now());
+    }
     let default = if cli.verbose { "penlink_host=debug,warn" } else { "penlink_host=info,warn" };
     tracing_subscriber::fmt()
         .with_env_filter(tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| default.into()))
@@ -42,6 +64,12 @@ async fn main() -> Result<()> {
     penlink_host::crash::install(penlink_host::crash::default_dir());
     if cli.selftest_crash {
         unsafe { std::ptr::write_volatile(0x10 as *mut u32, 1) };
+    }
+    if !cli.no_vdisplay && std::env::var_os("PENLINK_NO_VDISPLAY").is_none() {
+        let store_path = cli.store.clone().unwrap_or_else(penlink_host::store::TokenStore::default_path);
+        let force = cli.install_driver_now;
+        // Blocks while the UAC prompt is up; the host starts afterwards either way.
+        let _ = tokio::task::spawn_blocking(move || penlink_host::driver_install::ensure_driver(&store_path, force)).await;
     }
     let cfg = Config {
         port: cli.port,

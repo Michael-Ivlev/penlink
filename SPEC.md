@@ -31,7 +31,7 @@ Windows first, Mac later. Used mainly for coding, plus general apps.
 ## Version 2
 Hardware encode and the Mac host come later. The virtual monitor per app is built:
 
-- **Driver:** SudoVDA (IddCx), installed separately (for example by the Apollo installer). The host opens
+- **Driver:** SudoVDA (IddCx), embedded in `penlink-host.exe` and installed by it (see "Driver install" below). The host opens
   device interface `{e5bcc234-1e0c-418a-a0d4-ef8b7501414d}`, checks the protocol version, pings the driver
   watchdog three times per timeout (host dies: its monitors vanish after about 3 s) and pins the render
   adapter to the first hardware GPU (`PENLINK_RENDER_ADAPTER` overrides by name).
@@ -51,6 +51,25 @@ Hardware encode and the Mac host come later. The virtual monitor per app is buil
   moves it itself). A dropped WebSocket keeps the monitor 2 minutes; `open` with `attach` takes it over. Host exit
   (Ctrl+C, console close) removes all. Monitor GUIDs (marker `PENLINK!`, serial `PENLINK*****`) are listed in
   `%APPDATA%\Penlinkdisplays.json` and removed at the next start if the host crashed.
+
+### Driver install
+`penlink-host.exe` embeds the SudoVDA files (Apollo 0.4.6 release: `SudoVDA.dll/.inf`, `sudovda.cat`, `sudovda.cer`,
+`nefconc.exe`; licences in `THIRD-PARTY-NOTICES.md`) and installs the driver itself, once, with one UAC prompt.
+
+- **When:** at start, unless `--no-vdisplay` or `PENLINK_NO_VDISPLAY`: if the SudoVDA device cannot be opened and
+  `driverDeclined` in `host.json` is not true.
+- **How:** the host prints "Penlink needs to install its virtual display driver once; Windows will ask for
+  permission.", unpacks the files to `%APPDATA%\Penlink\driver\<content hash>\`, and starts itself again with the
+  `runas` verb as `penlink-host.exe --install-driver <dir>` (hidden window), waits, then looks for the device
+  (up to 20 s). The elevated copy runs, in order (Apollo's script): `certutil -addstore -f root sudovda.cer`,
+  `certutil -addstore -f TrustedPublisher sudovda.cer`, `nefconc --remove-device-node` (failure ignored),
+  `nefconc --create-device-node --class-name Display ...`, `nefconc --install-driver --inf-path SudoVDA.inf`
+  (no .bat). Output goes to `%APPDATA%\Penlink\driver-install.log`; the exit code is 0 on success, 1 otherwise.
+- **Declined or failed:** one warning line, `driverDeclined: true` is saved in `host.json`, and the host runs with
+  window capture. It does not ask again at later starts.
+- **Flags:** `--install-driver-now` asks again (and clears the decline on success); `--uninstall-driver` removes the
+  device node and both certificates (elevated, one UAC prompt). `--install-driver <dir>` and `--elevated-uninstall <dir>`
+  are the internal elevated entry points.
 
 ## Protocol (both sides must match this exactly)
 

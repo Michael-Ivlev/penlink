@@ -36,8 +36,10 @@ Windows PC agent for Penlink: streams one app window to the phone over WebRTC
 
 ## Virtual monitors (SudoVDA)
 
-- Needs the SudoVDA driver (`root\sudomaker\sudovda`, installed for example by the Apollo installer). Without it
-  the host says "window capture" at start and works as before. `--no-vdisplay` forces that.
+- Needs the SudoVDA driver (`root\sudomaker\sudovda`). It is embedded in `penlink-host.exe`: on the first start the
+  host asks Windows for permission once (UAC) and installs it. If you decline, it remembers that (`driverDeclined`
+  in `host.json`) and uses window capture; `--install-driver-now` asks again, `--uninstall-driver` removes the driver
+  and its certificates. Log: `%APPDATA%\Penlink\driver-install.log`. `--no-vdisplay` forces window capture.
 - `cargo run --example vdcheck` shows whether the driver is there, the GPUs and the monitors;
   `-- --make 1440x3120 --dpi 300 --secs 8` creates one Penlink monitor, removes it and checks that the real
   monitors are unchanged. Penlink only touches monitors it created (GUID marker `PENLINK!`), never the primary.

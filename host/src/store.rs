@@ -61,6 +61,9 @@ pub struct TokenEntry {
 pub struct StoreData {
     #[serde(default)]
     pub tokens: Vec<TokenEntry>,
+    /// The user declined (or failed) the one-time virtual display driver install.
+    #[serde(default)]
+    pub driver_declined: bool,
 }
 
 #[derive(Debug)]

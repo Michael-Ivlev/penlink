@@ -20,7 +20,7 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.Minimize
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Keyboard
 import androidx.compose.material.icons.filled.Mouse
@@ -50,6 +50,9 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.gestures.detectVerticalDragGestures
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalView
@@ -105,7 +108,7 @@ fun SessionScreen(app: PenlinkApp, conn: HostConnection, selectedId: Long) {
     val activity = LocalActivity.current
     val view = LocalView.current
     val sessions by conn.sessions.collectAsState()
-    val current = sessions.firstOrNull { it.localId == selectedId } ?: sessions.lastOrNull()
+    val current = sessions.firstOrNull { it.localId == selectedId }
     val scope = rememberCoroutineScope()
 
     // Immersive: no system bars while this screen is shown.
@@ -161,12 +164,17 @@ fun SessionScreen(app: PenlinkApp, conn: HostConnection, selectedId: Long) {
         LaunchedEffect(Unit) { app.navigate(Screen.Apps) }
         return
     }
-    LaunchedEffect(current.localId) { app.navigate(Screen.Session(current.localId)) }
+    var imeRef by remember(current.localId) { mutableStateOf<ImeCaptureView?>(null) }
 
-    BackHandler { app.navigate(Screen.Apps) }
+    // Minimize: back to the Apps screen. The session, the connection, the PC app and its virtual monitor all stay.
+    val minimize = {
+        imeRef?.hide()
+        app.navigate(Screen.Apps)
+    }
+    BackHandler { minimize() }
 
     var trackpad by remember { mutableStateOf(false) }
-    var stripVisible by remember { mutableStateOf(true) }
+    var barVisible by remember { mutableStateOf(false) }
     var activity_ticks by remember { mutableIntStateOf(0) }
     var showSettings by remember { mutableStateOf(false) }
     val keyLogic = remember(current.localId) { KeyboardLogic() }
@@ -175,16 +183,15 @@ fun SessionScreen(app: PenlinkApp, conn: HostConnection, selectedId: Long) {
     val track by current.videoTrack.collectAsState()
     val videoSize by current.videoSize.collectAsState()
 
-    // Auto-hide the tab strip.
-    LaunchedEffect(stripVisible, activity_ticks, showSettings) {
-        if (stripVisible && !showSettings) {
+    // Auto-hide the control bar.
+    LaunchedEffect(barVisible, activity_ticks, showSettings) {
+        if (barVisible && !showSettings) {
             delay(4000)
-            stripVisible = false
+            barVisible = false
         }
     }
 
     var overlayRef by remember(current.localId) { mutableStateOf<InputOverlayView?>(null) }
-    var imeRef by remember(current.localId) { mutableStateOf<ImeCaptureView?>(null) }
 
     fun sendKeys(actions: List<KeyAction>) {
         for (a in actions) current.sendInput(InputMsg.key(a.down, a.vk))
@@ -320,65 +327,26 @@ fun SessionScreen(app: PenlinkApp, conn: HostConnection, selectedId: Long) {
                 horizontalAlignment = Alignment.CenterHorizontally,
             ) {
                 Text("$title closed (${s.reason})", color = Color.White)
-                Button(onClick = { conn.close(current) }) { Text("Close tab") }
+                Button(onClick = { conn.close(current); app.navigate(Screen.Apps) }) { Text("Close") }
             }
             SessionStatus.Live -> {}
         }
 
-        // Tab strip (auto-hide).
-        if (stripVisible) {
+        // Control bar (hidden by default, so the remote app has the whole screen): Minimize, Close, Keyboard,
+        // trackpad, zoom reset, settings. A small pill in the top strip (the black safe-area margin above the video,
+        // so it covers no part of the remote app) opens it by tap or swipe down.
+        if (barVisible) {
             Row(
                 Modifier.fillMaxWidth().padding(top = with(density) { safeT.toDp() }, start = with(density) { safeL.toDp() }, end = with(density) { safeR.toDp() })
                     .background(Color(0xE61E1E2E)).padding(horizontal = 4.dp, vertical = 2.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                IconButton(onClick = { app.navigate(Screen.Apps) }) {
-                    Icon(Icons.Default.Add, contentDescription = "Open another app", tint = Color.White)
-                }
-                Row(
-                    Modifier.weight(1f).horizontalScroll(rememberScrollState()),
-                    horizontalArrangement = Arrangement.spacedBy(4.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    for (s in sessions) {
-                        val t by s.title.collectAsState()
-                        val st by s.status.collectAsState()
-                        val selected = s.localId == current.localId
-                        Row(
-                            Modifier.clip(RoundedCornerShape(8.dp))
-                                .background(if (selected) Color(0xFF89B4FA) else Color(0xFF45475A))
-                                .clickable {
-                                    activity_ticks++
-                                    app.navigate(Screen.Session(s.localId))
-                                }
-                                .padding(start = 10.dp),
-                            verticalAlignment = Alignment.CenterVertically,
-                        ) {
-                            if (st == SessionStatus.Opening || st == SessionStatus.Connecting || st == SessionStatus.Reconnecting) {
-                                CircularProgressIndicator(
-                                    modifier = Modifier.padding(end = 6.dp).size(14.dp),
-                                    strokeWidth = 2.dp,
-                                    color = if (selected) Color.Black else Color.White,
-                                )
-                            }
-                            Text(
-                                t,
-                                color = if (selected) Color.Black else Color.White,
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis,
-                                modifier = Modifier.width(110.dp),
-                                style = MaterialTheme.typography.labelLarge,
-                            )
-                            IconButton(onClick = { conn.close(s) }, modifier = Modifier.size(32.dp)) {
-                                Icon(
-                                    Icons.Default.Close, contentDescription = "Close tab",
-                                    tint = if (selected) Color.Black else Color.White,
-                                    modifier = Modifier.size(16.dp),
-                                )
-                            }
-                        }
-                    }
-                }
+                BarButton(Icons.Default.Minimize, "Minimize (keeps the app running)", "Minimize") { minimize() }
+                Text(
+                    title, color = Color.White, maxLines = 1, overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f).padding(horizontal = 8.dp),
+                    style = MaterialTheme.typography.labelLarge,
+                )
                 IconButton(onClick = { trackpad = !trackpad; activity_ticks++ }) {
                     Icon(
                         if (trackpad) Icons.Default.Mouse else Icons.Default.TouchApp,
@@ -398,14 +366,17 @@ fun SessionScreen(app: PenlinkApp, conn: HostConnection, selectedId: Long) {
                 }) {
                     Icon(Icons.Default.Keyboard, contentDescription = "Keyboard", tint = if (imeVisible) Color(0xFF89B4FA) else Color.White)
                 }
+                BarButton(Icons.Default.Close, "Close (ends the session and removes the virtual monitor)", "Close", tint = Color(0xFFF38BA8)) {
+                    imeRef?.hide()
+                    conn.close(current)
+                    app.navigate(Screen.Apps)
+                }
             }
         } else {
-            // Small handle to bring the strip back.
-            Box(
-                Modifier.align(Alignment.TopCenter).padding(top = with(density) { safeT.toDp() } + 2.dp)
-                    .clip(RoundedCornerShape(50)).background(Color(0x66FFFFFF))
-                    .clickable { stripVisible = true }
-                    .size(width = 56.dp, height = 12.dp),
+            SessionHandle(
+                modifier = Modifier.align(Alignment.TopCenter).padding(start = with(density) { safeL.toDp() }, end = with(density) { safeR.toDp() }),
+                stripHeight = with(density) { safeT.toDp() },
+                onOpen = { barVisible = true },
             )
         }
 
@@ -512,5 +483,35 @@ private fun SettingsSheet(app: PenlinkApp, conn: HostConnection, session: Remote
             }
             Text("Phone area: ${size.first} x ${size.second} px", style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(top = 4.dp))
         }
+    }
+}
+
+@Composable
+private fun BarButton(icon: androidx.compose.ui.graphics.vector.ImageVector, description: String, label: String, tint: Color = Color.White, onClick: () -> Unit) {
+    Row(
+        Modifier.clip(RoundedCornerShape(8.dp)).clickable(onClick = onClick).padding(horizontal = 8.dp, vertical = 8.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Icon(icon, contentDescription = description, tint = tint, modifier = Modifier.size(20.dp))
+        Text(label, color = tint, modifier = Modifier.padding(start = 4.dp), style = MaterialTheme.typography.labelLarge)
+    }
+}
+
+/**
+ * The always-visible way to the control bar: a thin pill centred in the top strip. The strip (status bar / cutout
+ * height) is outside the video, so tapping it never reaches the remote app; when a phone has no such strip the pill is
+ * only a few dp tall at the very top. Tap or swipe down opens the bar.
+ */
+@Composable
+private fun SessionHandle(modifier: Modifier, stripHeight: androidx.compose.ui.unit.Dp, onOpen: () -> Unit) {
+    val h = stripHeight.coerceIn(14.dp, 36.dp)
+    Box(
+        modifier
+            .width(140.dp).height(h)
+            .pointerInput(Unit) { detectTapGestures { onOpen() } }
+            .pointerInput(Unit) { detectVerticalDragGestures { _, dy -> if (dy > 4f) onOpen() } },
+        contentAlignment = Alignment.Center,
+    ) {
+        Box(Modifier.clip(RoundedCornerShape(50)).background(Color(0x99FFFFFF)).size(width = 56.dp, height = 6.dp))
     }
 }

@@ -16,6 +16,18 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawingPadding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.grid.GridCells
+import androidx.compose.foundation.lazy.grid.GridItemSpan
+import androidx.compose.foundation.background
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.filled.Close
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.TextButton
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
+import dev.penlink.rtc.RemoteSession
+import dev.penlink.rtc.SessionStatus
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.material.icons.Icons
@@ -67,25 +79,47 @@ fun AppsScreen(app: PenlinkApp, conn: HostConnection) {
         }
     }
 
+    var confirmLeave by remember { mutableStateOf(false) }
+    // Back with apps open keeps them (and the connection) and just sends Penlink to the background;
+    // leaving the PC for good is the arrow in the top bar.
     BackHandler {
-        app.disconnect()
-        app.navigate(Screen.Hosts)
+        if (sessions.isNotEmpty()) {
+            activity?.moveTaskToBack(true)
+        } else {
+            app.disconnect()
+            app.navigate(Screen.Hosts)
+        }
+    }
+
+    if (confirmLeave) {
+        AlertDialog(
+            onDismissRequest = { confirmLeave = false },
+            title = { Text("Leave ${conn.host.name}?") },
+            text = { Text("${sessions.size} open app(s) will be closed and their virtual monitors removed. The apps stay open on the PC.") },
+            confirmButton = {
+                TextButton(onClick = {
+                    confirmLeave = false
+                    app.disconnect()
+                    app.navigate(Screen.Hosts)
+                }) { Text("Leave") }
+            },
+            dismissButton = { TextButton(onClick = { confirmLeave = false }) { Text("Stay") } },
+        )
     }
 
     Column(Modifier.fillMaxSize().safeDrawingPadding().padding(horizontal = 12.dp)) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             IconButton(onClick = {
-                app.disconnect()
-                app.navigate(Screen.Hosts)
-            }) { Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back") }
+                if (sessions.isNotEmpty()) {
+                    confirmLeave = true
+                } else {
+                    app.disconnect()
+                    app.navigate(Screen.Hosts)
+                }
+            }) { Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back to PCs") }
             Column(Modifier.weight(1f)) {
                 Text(conn.host.name, style = MaterialTheme.typography.titleLarge)
                 Text(conn.host.address, style = MaterialTheme.typography.bodySmall)
-            }
-            if (sessions.isNotEmpty()) {
-                Button(onClick = { app.navigate(Screen.Session(sessions.last().localId)) }) {
-                    Text("Open apps (${sessions.size})")
-                }
             }
         }
         OutlinedTextField(
@@ -116,11 +150,27 @@ fun AppsScreen(app: PenlinkApp, conn: HostConnection) {
                     horizontalArrangement = Arrangement.spacedBy(8.dp),
                     modifier = Modifier.fillMaxSize(),
                 ) {
+                    if (sessions.isNotEmpty()) {
+                        item(span = { GridItemSpan(maxLineSpan) }, key = "open-now") {
+                            Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                                Text("Open now", style = MaterialTheme.typography.titleMedium)
+                                for (s in sessions) OpenNowRow(app, conn, s)
+                                Spacer(Modifier.height(4.dp))
+                                Text("All apps", style = MaterialTheme.typography.titleMedium)
+                            }
+                        }
+                    }
                     items(shown, key = { it.id }) { a ->
                         AppTile(app, conn, a) {
-                            val (w, h) = activity?.windowPixels() ?: (1080 to 2340)
-                            val s = conn.open(a, w, h, prefs)
-                            app.navigate(Screen.Session(s.localId))
+                            // An app that is already open is resumed, not started a second time.
+                            val running = sessions.lastOrNull { it.appId == a.id && it.status.value !is SessionStatus.Closed }
+                            if (running != null) {
+                                app.navigate(Screen.Session(running.localId))
+                            } else {
+                                val (w, h) = activity?.windowPixels() ?: (1080 to 2340)
+                                val s = conn.open(a, w, h, prefs)
+                                app.navigate(Screen.Session(s.localId))
+                            }
                         }
                     }
                 }
@@ -158,5 +208,57 @@ private fun AppTile(app: PenlinkApp, conn: HostConnection, entry: AppEntry, onCl
             textAlign = TextAlign.Center,
             style = MaterialTheme.typography.labelMedium,
         )
+    }
+}
+
+/** Plain-language state of an open session, for the "Open now" row. */
+fun sessionStateLabel(s: SessionStatus): String = when (s) {
+    SessionStatus.Live -> "Connected"
+    SessionStatus.Opening -> "Opening..."
+    SessionStatus.Connecting -> "Connecting..."
+    SessionStatus.Reconnecting -> "Reconnecting..."
+    is SessionStatus.Closed -> "Closed"
+}
+
+/** One running session: icon, title and live state; tap resumes it at once, X ends it. */
+@Composable
+private fun OpenNowRow(app: PenlinkApp, conn: HostConnection, s: RemoteSession) {
+    val title by s.title.collectAsState()
+    val status by s.status.collectAsState()
+    val bmp by produceState(app.cachedIcon(s.appId), s.appId) {
+        if (value == null) {
+            app.api.icon(conn.host.address, conn.host.token, s.appId)?.let {
+                app.cacheIcon(s.appId, it)
+                value = it
+            }
+        }
+    }
+    val live = status == SessionStatus.Live
+    Row(
+        Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp))
+            .background(MaterialTheme.colorScheme.surfaceVariant)
+            .clickable { app.navigate(Screen.Session(s.localId)) }
+            .padding(start = 12.dp, top = 6.dp, bottom = 6.dp, end = 4.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Box(Modifier.size(40.dp), contentAlignment = Alignment.Center) {
+            val b = bmp
+            if (b != null) Image(b.asImageBitmap(), contentDescription = null, modifier = Modifier.size(40.dp))
+            else Text(title.take(1).uppercase(), style = MaterialTheme.typography.titleLarge)
+        }
+        Column(Modifier.weight(1f).padding(horizontal = 12.dp)) {
+            Text(title, maxLines = 1, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.titleSmall)
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                if (live) {
+                    Box(Modifier.size(8.dp).clip(CircleShape).background(Color(0xFFA6E3A1)))
+                } else if (status !is SessionStatus.Closed) {
+                    CircularProgressIndicator(Modifier.size(10.dp), strokeWidth = 1.5.dp)
+                }
+                Text(sessionStateLabel(status), Modifier.padding(start = 6.dp), style = MaterialTheme.typography.bodySmall)
+            }
+        }
+        IconButton(onClick = { conn.close(s) }) {
+            Icon(Icons.Default.Close, contentDescription = "Close $title")
+        }
     }
 }

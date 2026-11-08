@@ -171,6 +171,13 @@ fun SettingsSheet(app: PenlinkApp, conn: HostConnection, session: RemoteSession,
                     }
                 }
                 Hint("Phone area: ${size.first} x ${size.second} px")
+                val stats by app.rtc.latencyOverlay.collectAsState()
+                SwitchRow(
+                    title = "Show performance stats",
+                    checked = stats,
+                    description = "A small readout of lag, frame rate and network timing in the corner of the app.",
+                    onChange = { haptics.toggle(it); app.rtc.setLatencyOverlay(it) },
+                )
             }
         }
     }

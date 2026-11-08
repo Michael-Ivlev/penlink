@@ -1,7 +1,6 @@
 package dev.penlink.rtc
 
 import android.content.Context
-import android.content.pm.ApplicationInfo
 import android.net.wifi.WifiManager
 import kotlinx.coroutines.flow.MutableStateFlow
 import org.webrtc.LowLatencyDecoderFactory
@@ -15,10 +14,15 @@ class Rtc(context: Context) {
     private var lowLatencyLock: WifiManager.WifiLock? = null
     private var lockUsers = 0
 
-    /** Whether the latency readout is shown on the session screen (debug builds by default; `--ez latency false` hides it). */
-    val latencyOverlay = MutableStateFlow(
-        (appContext.applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE) != 0,
-    )
+    private val uiPrefs = appContext.getSharedPreferences("penlink_ui", Context.MODE_PRIVATE)
+
+    /** Whether the latency readout is shown on the session screen. Off by default; the settings sheet toggles it (saved). */
+    val latencyOverlay = MutableStateFlow(uiPrefs.getBoolean("latencyOverlay", false))
+
+    fun setLatencyOverlay(on: Boolean) {
+        latencyOverlay.value = on
+        uiPrefs.edit().putBoolean("latencyOverlay", on).apply()
+    }
 
     /**
      * Holds the Wi-Fi radio in its low-latency mode (no power-save batching of packets, which on a phone is what

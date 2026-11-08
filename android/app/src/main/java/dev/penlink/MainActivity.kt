@@ -93,7 +93,7 @@ class MainActivity : ComponentActivity() {
      */
     private fun handleDebugIntent(intent: Intent?) {
         // `--ez latency true|false` shows or hides the latency overlay (on by default in debug builds).
-        if (intent?.hasExtra("latency") == true) (application as PenlinkApp).rtc.latencyOverlay.value = intent.getBooleanExtra("latency", true)
+        if (intent?.hasExtra("latency") == true) (application as PenlinkApp).rtc.setLatencyOverlay(intent.getBooleanExtra("latency", true))
         if (applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE == 0) return
         val appId = intent?.getStringExtra("openAppId")?.takeIf { it.isNotBlank() } ?: return
         intent.removeExtra("openAppId")

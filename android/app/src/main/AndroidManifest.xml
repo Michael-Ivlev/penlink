@@ -9,7 +9,8 @@
     <application
         android:name=".PenlinkApp"
         android:allowBackup="false"
-        android:icon="@drawable/ic_launcher"
+        android:icon="@mipmap/ic_launcher"
+        android:roundIcon="@mipmap/ic_launcher_round"
         android:label="Penlink"
         android:networkSecurityConfig="@xml/network_security_config"
         android:supportsRtl="true"
@@ -19,6 +20,7 @@
             android:name=".MainActivity"
             android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboard|keyboardHidden|uiMode|density|fontScale|layoutDirection"
             android:exported="true"
+            android:theme="@style/Theme.Penlink.Starting"
             android:launchMode="singleTop"
             android:windowSoftInputMode="adjustNothing">
             <intent-filter>

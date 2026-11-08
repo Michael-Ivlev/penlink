@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="penlink_surface">#FBF8FF</color>
+    <color name="icon_background_start">#4A3FD0</color>
+    <color name="icon_background_end">#1B1557</color>
+</resources>

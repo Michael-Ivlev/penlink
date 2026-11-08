@@ -48,7 +48,7 @@ class MainActivity : ComponentActivity() {
 
     /**
      * Debug builds only: `adb shell am start -n dev.penlink/.MainActivity --es openAppId "<appId>"`
-     * connects to the first saved PC and opens that raw appId (for example an `exe:` id for a
+     * connects to the first saved PC (or the one whose address equals `--es host 10.0.2.2:47900`) and opens that raw appId (for example an `exe:` id for a
      * test window that is not in the Start Menu).
      */
     private fun handleDebugIntent(intent: Intent?) {
@@ -57,7 +57,9 @@ class MainActivity : ComponentActivity() {
         intent.removeExtra("openAppId")
         val app = application as PenlinkApp
         lifecycleScope.launch {
-            val host = app.store.hosts.first().firstOrNull()
+            val want = intent.getStringExtra("host")
+            val hosts = app.store.hosts.first()
+            val host = if (want != null) hosts.firstOrNull { it.address == want } else hosts.firstOrNull()
             if (host == null) {
                 Toast.makeText(this@MainActivity, "openAppId: no saved PC", Toast.LENGTH_LONG).show()
                 return@launch

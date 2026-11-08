@@ -1,3 +1,4 @@
+#![windows_subsystem = "windows"]
 //! Test target for end-to-end runs: a plain Win32 window "Penlink Testpad" with a multi-line
 //! EDIT control. Every character, key, mouse and pen/touch pointer event it receives is
 //! appended to the log file given as the first argument.

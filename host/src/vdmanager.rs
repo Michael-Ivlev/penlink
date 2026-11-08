@@ -135,9 +135,9 @@ impl VdManager {
         }
     }
 
-    /// Adding a monitor makes Windows fall back to 100% DPI on the monitors that already exist (seen
-    /// with two phone sessions: the first monitor lost its 200% when the second was added), so
-    /// every other monitor gets its asked-for DPI step again. Setting the step it already has is a no-op.
+    /// Adding or removing a monitor makes Windows fall back to 100% DPI on the monitors that remain (seen
+    /// with two phone sessions: the first monitor lost its 200% when the second was added, the second when
+    /// the first was closed), so every other monitor gets its asked-for DPI step again. Setting the step it already has is a no-op.
     fn reassert_dpi(&self, g: &mut Inner, except: &Guid) {
         for (guid, lease) in g.leases.iter_mut() {
             if guid == except {
@@ -272,6 +272,8 @@ impl VdManager {
         let Some(lease) = g.leases.remove(guid) else { return };
         self.return_app_window(&lease);
         self.remove_lease(g, guid, &lease);
+        // Removing a monitor also sends the others back to 100% DPI.
+        self.reassert_dpi(g, guid);
     }
 
     fn remove_lease(&self, g: &mut Inner, guid: &Guid, lease: &Lease) {
@@ -474,6 +476,20 @@ mod tests {
         let _b = m.create(1280, 2628, 200).unwrap();
         let after = be.calls().iter().filter(|c| c.starts_with(&format!("dpi {} 200", a.gdi_name))).count();
         assert_eq!(after, before + 1, "{:?}", be.calls());
+        let _ = std::fs::remove_dir_all(p.parent().unwrap());
+    }
+
+    #[test]
+    fn removing_a_monitor_restores_the_dpi_of_the_others() {
+        let be = FakeBackend::real_monitors();
+        let (l, p) = ledger("reassert-rm");
+        let m = VdManager::new(be.clone(), l);
+        let a = m.create(1280, 2628, 200).unwrap();
+        let b = m.create(1280, 2628, 200).unwrap();
+        let count = |be: &std::sync::Arc<FakeBackend>| be.calls().iter().filter(|c| c.starts_with(&format!("dpi {} 200", b.gdi_name))).count();
+        let before = count(&be);
+        m.release(&a.guid);
+        assert_eq!(count(&be), before + 1, "{:?}", be.calls());
         let _ = std::fs::remove_dir_all(p.parent().unwrap());
     }
 

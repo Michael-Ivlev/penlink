@@ -74,6 +74,11 @@ import androidx.compose.ui.platform.LocalLayoutDirection
 import androidx.compose.foundation.layout.ime
 import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.runtime.rememberUpdatedState
+import androidx.compose.runtime.derivedStateOf
+import androidx.compose.runtime.snapshotFlow
+import androidx.compose.foundation.layout.offset
+import androidx.compose.ui.unit.IntOffset
+import dev.penlink.input.KeyboardPan
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalDensity
 import dev.penlink.input.ImeMapping
@@ -147,9 +152,9 @@ fun SessionScreen(app: PenlinkApp, conn: HostConnection, selectedId: Long) {
         conn.onScreenSize(w, h)
     }
     val density = LocalDensity.current
-    val imePx = WindowInsets.ime.getBottom(density)
-    val imeVisible = imePx > 0
-    val reservePx = if (imeVisible) imePx + with(density) { ExtraKeysHeight.roundToPx() } else 0
+    val imeInsets = WindowInsets.ime
+    val imeVisible by remember { derivedStateOf { imeInsets.getBottom(density) > 0 } }
+    val rowPx = with(density) { ExtraKeysHeight.roundToPx() }
 
     // Safe area: display cutout and system bars (as if shown, so it does not jump when the bars are hidden).
     val ld = LocalLayoutDirection.current
@@ -165,6 +170,12 @@ fun SessionScreen(app: PenlinkApp, conn: HostConnection, selectedId: Long) {
         return
     }
     var imeRef by remember(current.localId) { mutableStateOf<ImeCaptureView?>(null) }
+
+    // Keyboard behaviour (saved per host): by default the PC window keeps its size and the picture slides up above
+    // the keyboard; with "Resize app above keyboard" the PC window is resized to the area above it instead.
+    val sessionPrefs by current.prefs.collectAsState()
+    val resizeAbove = sessionPrefs.resizeAboveKeyboard
+    val reservePx = if (resizeAbove && imeVisible) imeInsets.getBottom(density) + rowPx else 0
 
     // Minimize: back to the Apps screen. The session, the connection, the PC app and its virtual monitor all stay.
     val minimize = {
@@ -192,6 +203,21 @@ fun SessionScreen(app: PenlinkApp, conn: HostConnection, selectedId: Long) {
     }
 
     var overlayRef by remember(current.localId) { mutableStateOf<InputOverlayView?>(null) }
+
+    // Drive the keyboard pan from the IME inset, which Compose updates on every frame of the keyboard animation
+    // (WindowInsetsAnimation), so the picture moves with the keyboard. This only translates the video view; nothing is
+    // measured or laid out and the SurfaceView is never resized.
+    val safeBNow by rememberUpdatedState(safeB)
+    val panMarginPx = with(density) { 24.dp.toPx() }
+    LaunchedEffect(overlayRef, resizeAbove) {
+        val o = overlayRef ?: return@LaunchedEffect
+        if (resizeAbove) {
+            o.setKeyboardCovered(0f, panMarginPx)
+            return@LaunchedEffect
+        }
+        snapshotFlow { KeyboardPan.covered(imeInsets.getBottom(density), rowPx, safeBNow) }
+            .collect { o.setKeyboardCovered(it, panMarginPx) }
+    }
 
     fun sendKeys(actions: List<KeyAction>) {
         for (a in actions) current.sendInput(InputMsg.key(a.down, a.vk))
@@ -343,7 +369,12 @@ fun SessionScreen(app: PenlinkApp, conn: HostConnection, selectedId: Long) {
                     .background(Color(0xE61E1E2E)).padding(horizontal = 4.dp, vertical = 2.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                BarButton(Icons.Default.Minimize, "Minimize (keeps the app running)", "Minimize") { minimize() }
+                TrafficLight(TrafficKind.Close, "Close (ends the session and removes the virtual monitor)") {
+                    imeRef?.hide()
+                    conn.close(current)
+                    app.navigate(Screen.Apps)
+                }
+                TrafficLight(TrafficKind.Minimize, "Minimize (keeps the app running)") { minimize() }
                 Text(
                     title, color = Color.White, maxLines = 1, overflow = TextOverflow.Ellipsis,
                     modifier = Modifier.weight(1f).padding(horizontal = 8.dp),
@@ -368,11 +399,6 @@ fun SessionScreen(app: PenlinkApp, conn: HostConnection, selectedId: Long) {
                 }) {
                     Icon(Icons.Default.Keyboard, contentDescription = "Keyboard", tint = if (imeVisible) Color(0xFF89B4FA) else Color.White)
                 }
-                BarButton(Icons.Default.Close, "Close (ends the session and removes the virtual monitor)", "Close", tint = Color(0xFFF38BA8)) {
-                    imeRef?.hide()
-                    conn.close(current)
-                    app.navigate(Screen.Apps)
-                }
             }
         } else {
             SessionHandle(
@@ -389,6 +415,8 @@ fun SessionScreen(app: PenlinkApp, conn: HostConnection, selectedId: Long) {
                 logic = keyLogic,
                 onKeys = { sendKeys(it) },
                 modifier = Modifier.align(Alignment.BottomCenter).windowInsetsPadding(WindowInsets.ime)
+                    // Slides up from behind the keyboard during the first row-height of its animation.
+                    .offset { IntOffset(0, rowPx - KeyboardPan.rowShown(imeInsets.getBottom(density), rowPx).toInt()) }
                     .padding(start = with(density) { safeL.toDp() }, end = with(density) { safeR.toDp() }),
             )
         }
@@ -428,7 +456,7 @@ private fun SettingsSheet(app: PenlinkApp, conn: HostConnection, session: Remote
                 onValueChange = { step = it },
                 valueRange = 0f..(steps.size - 1).toFloat(),
                 steps = (steps.size - 2).coerceAtLeast(0),
-                onValueChangeFinished = { apply(StreamPrefs(sharp, uiPercent)) },
+                onValueChangeFinished = { apply(prefs.copy(sharpText = sharp, uiScale = uiPercent)) },
             )
             Row(Modifier.fillMaxWidth().padding(top = 8.dp), verticalAlignment = Alignment.CenterVertically) {
                 Column(Modifier.weight(1f)) {
@@ -441,11 +469,23 @@ private fun SettingsSheet(app: PenlinkApp, conn: HostConnection, session: Remote
                 }
                 Switch(checked = sharp, onCheckedChange = { on ->
                     sharp = on
-                    val p = StreamPrefs(on, uiPercent).fitted(sw, sh)
+                    val p = prefs.copy(sharpText = on, uiScale = uiPercent).fitted(sw, sh)
                     val newSteps = StreamPrefs.steps(on, sw, sh)
                     step = newSteps.indexOf(p.uiScale).toFloat()
                     apply(p)
                 })
+            }
+
+            Row(Modifier.fillMaxWidth().padding(top = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+                Column(Modifier.weight(1f)) {
+                    Text("Resize app above keyboard", style = MaterialTheme.typography.titleMedium)
+                    Text(
+                        if (prefs.resizeAboveKeyboard) "On: the PC window shrinks to the area above the keyboard, so the app reflows."
+                        else "Off: the PC window keeps its size and the picture slides up so what you are working on stays visible above the keyboard.",
+                        style = MaterialTheme.typography.bodySmall,
+                    )
+                }
+                Switch(checked = prefs.resizeAboveKeyboard, onCheckedChange = { apply(prefs.copy(resizeAboveKeyboard = it)) })
             }
 
             val win by session.windowSize.collectAsState()
@@ -485,17 +525,6 @@ private fun SettingsSheet(app: PenlinkApp, conn: HostConnection, session: Remote
             }
             Text("Phone area: ${size.first} x ${size.second} px", style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(top = 4.dp))
         }
-    }
-}
-
-@Composable
-private fun BarButton(icon: androidx.compose.ui.graphics.vector.ImageVector, description: String, label: String, tint: Color = Color.White, onClick: () -> Unit) {
-    Row(
-        Modifier.clip(RoundedCornerShape(8.dp)).clickable(onClick = onClick).padding(horizontal = 8.dp, vertical = 8.dp),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        Icon(icon, contentDescription = description, tint = tint, modifier = Modifier.size(20.dp))
-        Text(label, color = tint, modifier = Modifier.padding(start = 4.dp), style = MaterialTheme.typography.labelLarge)
     }
 }
 

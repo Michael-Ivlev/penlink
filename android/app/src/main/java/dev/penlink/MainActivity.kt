@@ -91,7 +91,7 @@ class MainActivity : ComponentActivity() {
             val ui = if (intent.hasExtra("uiScale")) intent.getIntExtra("uiScale", prefs.uiScale) else null
             val (w, h) = windowPixels()
             if (q != null || ui != null) {
-                prefs = StreamPrefs(if (q != null) Quality.fromWire(q) == Quality.Sharp else prefs.sharpText, ui ?: prefs.uiScale).fitted(w, h)
+                prefs = prefs.copy(sharpText = if (q != null) Quality.fromWire(q) == Quality.Sharp else prefs.sharpText, uiScale = ui ?: prefs.uiScale).fitted(w, h)
                 app.store.setStreamPrefs(host.address, prefs)
             }
             val s = conn.open(AppEntry(appId, "debug app"), w, h, prefs)

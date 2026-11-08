@@ -22,7 +22,10 @@ class InputOverlayView(context: Context) : View(context) {
     /** Receives each JSON message for the `input` data channel. */
     var sink: (String) -> Unit = {}
 
-    /** Called whenever local zoom/pan change (scale, translationX, translationY). */
+    /**
+     * Called whenever local zoom/pan change (scale, translationX, translationY). The translation already includes
+     * the keyboard pan, so the owner just applies it to the video view.
+     */
     var onTransform: (Float, Float, Float) -> Unit = { _, _, _ -> }
 
     /** Direct = finger acts as touch; trackpad = finger moves a relative cursor. */
@@ -43,11 +46,63 @@ class InputOverlayView(context: Context) : View(context) {
     private val longPressMs = 450L
     private val tapMs = 280L
 
-    private fun mapper() = VideoMapper(width.toFloat(), height.toFloat(), videoW, videoH, zoom, panX, panY)
+    // ---- keyboard pan: the picture slides up so the last tap stays above the phone keyboard (no PC resize)
+
+    /** Current extra Y translation (<= 0) that keeps the focus above the keyboard. Added to [panY] for display and mapping. */
+    var keyboardPanY = 0f
+        private set
+    private var covered = 0f
+    private var marginPx = 0f
+
+    /** Last pressed point as a fraction of the video (the protocol has no caret position, so the last tap stands in). */
+    private var focusNormY = Double.NaN
+
+    /** The mapper for the picture as it is displayed right now (zoom, user pan and keyboard pan). */
+    private fun mapper() = VideoMapper(width.toFloat(), height.toFloat(), videoW, videoH, zoom, panX, panY + keyboardPanY)
+
+    /** The mapper without the keyboard pan: where things would be if the keyboard were hidden. */
+    private fun restMapper() = VideoMapper(width.toFloat(), height.toFloat(), videoW, videoH, zoom, panX, panY)
+
+    private fun notifyTransform() = onTransform(zoom, panX, panY + keyboardPanY)
+
+    /**
+     * The keyboard now covers [coveredPx] of the bottom of this view (called every frame of the keyboard animation, 0 =
+     * hidden). Moves the picture so the focus stays [margin] above it; back to 0 as the keyboard goes away.
+     */
+    fun setKeyboardCovered(coveredPx: Float, margin: Float) {
+        covered = coveredPx.coerceAtLeast(0f)
+        marginPx = margin
+        updateKeyboardPan()
+    }
+
+    private fun updateKeyboardPan() {
+        val h = height.toFloat()
+        val pan = if (h <= 0f || focusNormY.isNaN()) 0f else {
+            val m = restMapper()
+            -KeyboardPan.panUp(m.toViewY(focusNormY), m.toViewY(1.0), h, covered, marginPx)
+        }
+        if (pan != keyboardPanY) {
+            keyboardPanY = pan
+            notifyTransform()
+        }
+    }
+
+    /**
+     * A press at view point ([x], [y]) (as displayed now). While the keyboard is up a press only moves the focus further
+     * down (needing more pan), never back up, so tapping higher in the visible area does not make the picture jump.
+     */
+    private fun noteFocus(x: Float, y: Float) = noteFocusNorm(mapper().toNorm(x, y).y)
+
+    private fun noteFocusNorm(ny: Double) {
+        if (covered > 0f && !focusNormY.isNaN() && ny <= focusNormY) return
+        focusNormY = ny
+        updateKeyboardPan()
+    }
 
     fun resetZoom() {
         zoom = 1f; panX = 0f; panY = 0f
-        onTransform(zoom, panX, panY)
+        updateKeyboardPan()
+        notifyTransform()
     }
 
     // ---------------------------------------------------------------- pen & mouse (absolute)
@@ -139,6 +194,7 @@ class InputOverlayView(context: Context) : View(context) {
         when (e.actionMasked) {
             MotionEvent.ACTION_DOWN -> {
                 mouseButton = buttonOf(e.buttonState)
+                noteFocus(e.x, e.y)
                 sink(InputMsg.mouse(MouseAction.Move, n.x, n.y, mouseButton))
                 sink(InputMsg.mouse(MouseAction.Down, n.x, n.y, mouseButton))
             }
@@ -204,6 +260,7 @@ class InputOverlayView(context: Context) : View(context) {
     }
 
     private fun clickAtCursor(btn: MouseButton) {
+        if (btn == MouseButton.Left) noteFocusNorm(cursorY)
         sink(InputMsg.mouse(MouseAction.Move, cursorX, cursorY, btn))
         sink(InputMsg.mouse(MouseAction.Down, cursorX, cursorY, btn))
         sink(InputMsg.mouse(MouseAction.Up, cursorX, cursorY, btn))
@@ -226,6 +283,7 @@ class InputOverlayView(context: Context) : View(context) {
                     }
                 } else {
                     val n = mapper().toNorm(e.x, e.y)
+                    noteFocusNorm(n.y)
                     sink(InputMsg.touch(TouchAction.Down, primaryId, n.x, n.y))
                     touchSent = true
                     postDelayed(longPress, longPressMs)
@@ -375,10 +433,12 @@ class InputOverlayView(context: Context) : View(context) {
                 val k = if (oldZoom > 0f) newZoom / oldZoom else 1f
                 val fx = cx - width / 2f
                 val fy = cy - height / 2f
+                // The picture is displayed shifted by the keyboard pan too; keep that part out of the user pan.
                 panX = (fx - (fx - panX) * k) + (cx - lastCx)
-                panY = (fy - (fy - panY) * k) + (cy - lastCy)
+                panY = (fy - (fy - (panY + keyboardPanY)) * k) + (cy - lastCy) - keyboardPanY
                 clampPan()
-                onTransform(zoom, panX, panY)
+                updateKeyboardPan()
+                notifyTransform()
             }
             else -> {}
         }
@@ -397,7 +457,8 @@ class InputOverlayView(context: Context) : View(context) {
     override fun onSizeChanged(w: Int, h: Int, ow: Int, oh: Int) {
         super.onSizeChanged(w, h, ow, oh)
         clampPan()
-        onTransform(zoom, panX, panY)
+        updateKeyboardPan() // rotation or a new area size: recompute the pan for the new geometry
+        notifyTransform()
     }
 
     override fun onTouchEvent(e: MotionEvent): Boolean {
@@ -411,6 +472,7 @@ class InputOverlayView(context: Context) : View(context) {
             if (penActive) {
                 penPointerId = e.getPointerId(0)
                 requestUnbufferedDispatch(e)
+                noteFocus(e.x, e.y)
                 sendPen(PenAction.Down, e, 0, -1)
                 return true
             }

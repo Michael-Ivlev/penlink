@@ -60,6 +60,12 @@ data class VideoMapper(
         return NormPoint(nx.coerceIn(0.0, 1.0), ny.coerceIn(0.0, 1.0), inside)
     }
 
+    /** Inverse of [toNorm] on Y: normalised video Y (0..1) -> view pixel Y, with zoom and pan applied. */
+    fun toViewY(ny: Double): Float = (fitTop + ny.toFloat() * fitH - viewH / 2f) * zoom + viewH / 2f + panY
+
+    /** Inverse of [toNorm] on X. */
+    fun toViewX(nx: Double): Float = (fitLeft + nx.toFloat() * fitW - viewW / 2f) * zoom + viewW / 2f + panX
+
     /** Displayed size (view pixels) of one video pixel. */
     val displayedPixelSize: Float
         get() = if (videoW > 0) fitW * zoom / videoW else 1f

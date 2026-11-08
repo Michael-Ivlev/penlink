@@ -20,13 +20,21 @@ enum class Quality(val wire: String) {
  * 720x1560 monitor. With [sharpText] the monitor keeps the full phone resolution and Windows' own DPI scaling
  * makes the UI bigger (crisp, but Windows caps it at about 225% on this phone).
  */
-data class StreamPrefs(val sharpText: Boolean = false, val uiScale: Int = DEFAULT_UI_SCALE) {
+data class StreamPrefs(
+    val sharpText: Boolean = false,
+    val uiScale: Int = DEFAULT_UI_SCALE,
+    /**
+     * Off (default): the PC window keeps its size when the phone keyboard opens and the picture slides up so the spot
+     * you are working at stays visible. On: the old behaviour, the PC window is resized to the area above the keyboard.
+     */
+    val resizeAboveKeyboard: Boolean = false,
+) {
     val quality: Quality get() = if (sharpText) Quality.Sharp else Quality.Fast
 
     /** The old-style `scale` factor for hosts that only know that field. */
     val scaleFactor: Double get() = uiScale / 100.0
 
-    fun encode(): String = "v2:${quality.wire}:$uiScale"
+    fun encode(): String = "v2:${quality.wire}:$uiScale" + if (resizeAboveKeyboard) ":k" else ""
 
     /** The same settings with the UI size moved to the nearest step the screen allows in this mode. */
     fun fitted(width: Int, height: Int): StreamPrefs = copy(uiScale = snap(uiScale, steps(sharpText, width, height)))
@@ -50,9 +58,9 @@ data class StreamPrefs(val sharpText: Boolean = false, val uiScale: Int = DEFAUL
          */
         fun decode(s: String?): StreamPrefs {
             val parts = s?.split(':') ?: return StreamPrefs()
-            if (parts.size != 3 || parts[0] != "v2") return StreamPrefs()
+            if ((parts.size != 3 && parts.size != 4) || parts[0] != "v2") return StreamPrefs()
             val ui = parts[2].toIntOrNull() ?: return StreamPrefs()
-            return StreamPrefs(parts[1] == Quality.Sharp.wire, ui.coerceIn(100, 500))
+            return StreamPrefs(parts[1] == Quality.Sharp.wire, ui.coerceIn(100, 500), parts.getOrNull(3) == "k")
         }
 
         /** Highest low-resolution UI size for a screen: the smaller monitor side stays >= [USABLE_MONITOR_SIDE], in steps of 25. */

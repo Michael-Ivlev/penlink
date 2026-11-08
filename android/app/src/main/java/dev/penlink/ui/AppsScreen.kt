@@ -257,8 +257,6 @@ private fun OpenNowRow(app: PenlinkApp, conn: HostConnection, s: RemoteSession) 
                 Text(sessionStateLabel(status), Modifier.padding(start = 6.dp), style = MaterialTheme.typography.bodySmall)
             }
         }
-        IconButton(onClick = { conn.close(s) }) {
-            Icon(Icons.Default.Close, contentDescription = "Close $title")
-        }
+        TrafficLight(TrafficKind.Close, "Close $title") { conn.close(s) }
     }
 }

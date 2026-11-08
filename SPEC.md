@@ -215,7 +215,9 @@ All `x`,`y` are normalised 0..1 over the video frame (0,0 = top-left).
 3. **Session:** only the app, full screen (immersive, no system bars, inside the safe area) plus the extra-keys row
    when the keyboard is up. No tab bar. A thin pill sits in the top strip (the black status-bar/cutout margin above the
    video, so it never covers the remote app); tap it or swipe down on it to open a control bar (auto-hides after 4 s):
-   **Minimize**, the app title, trackpad/direct toggle, reset zoom, session settings, keyboard, **Close**.
+   macOS-style round buttons at the left (red **Close**, yellow **Minimize**; 24 dp circles in 48 dp touch targets, glyph
+   always visible), the app title, trackpad/direct toggle, reset zoom, session settings, keyboard. The red button
+   is also the X on the rows of "Open now".
    - **Minimize** (and the Android Back gesture): back to the Apps screen. The session, the WebSocket, the PC app and
      its virtual monitor all stay, so resuming is instant. Only the phone's renderer is released while minimized (no
      video is drawn); the protocol has no pause message, so the host keeps streaming. The WebSocket lives as long as the
@@ -244,11 +246,28 @@ combos (key down/up with the US virtual-key of that character) instead of 	ext; 
 map to the key at the same physical position on the standard Hebrew layout (ש = A, נ = B, ב = C ...),
 so Ctrl+<ב> is Ctrl+C.
 
-**Keyboard and window size.** While the IME and the extra row are visible the phone shows the video only
-in the area above them and sends 
-esize for that area (width = screen width, height = screen height minus
-IME minus row), debounced (250 ms), so the PC window gets exactly that area. Hiding the keyboard restores
-the full size.
+**Keyboard and window size.** Default: the PC window and the video keep their size when the phone keyboard opens or
+closes (no resize, no reflow, no flash); the keyboard simply overlays the bottom of the picture, like Windows App,
+Jump Desktop and Splashtop do. The phone **pans** the picture up so the point you are working at stays visible:
+- The focus point is the last press (finger, pen or mouse; in trackpad mode the cursor at the click). The protocol
+  carries no caret position, so a tap in a text field is the best signal. While the keyboard is up a press only moves
+  the focus further down, never back up, so tapping higher in the visible area does not make the picture jump.
+- Pan amount (pure maths in `KeyboardPan`): 0 when the focus is already above the keyboard + extra-keys row (with a
+  24 dp margin); otherwise just enough to bring it there, never more than aligning the bottom of the picture with the
+  keyboard, and never so far that the focus leaves the top of the video area.
+- It is driven by the IME inset, which Android animates frame by frame (WindowInsetsAnimation, read through Compose's
+  `WindowInsets.ime`), so the picture moves with the keyboard and goes back to 0 as it hides. Only the view's
+  translation changes; the SurfaceView is never resized or laid out. The extra-keys row slides up from behind the
+  keyboard during the first row-height of the animation.
+- It composes with the local pinch-zoom/pan: the displayed translation is user pan + keyboard pan, and `VideoMapper`
+  (touch to video coordinates) is given both, so taps land exactly where they are drawn.
+- Landscape: the keyboard covers most of the screen, so little of the picture stays visible. The focus is kept inside the
+  visible strip (the top margin wins when the strip is too small for both margins), but the surrounding context is
+  hidden. Hide the keyboard to see it, or turn on the setting below.
+- Setting **"Resize app above keyboard"** (session settings, saved per host, default off) restores the old behaviour:
+  the video area is the window minus keyboard minus extra row, and `resize` is sent (debounced 250 ms) for that area,
+  so the PC window shrinks and the app reflows; hiding the keyboard restores the full size. No pan in this mode.
+Rotation always sends one debounced `resize`, in both modes.
 
 **Reconnecting.** If the WebSocket drops (host restarted or crashed, network change) the phone keeps its
 tabs in a "reconnecting" state, retries with backoff (0.5, 1, 2, 4, 5 s) and, once connected, re-opens

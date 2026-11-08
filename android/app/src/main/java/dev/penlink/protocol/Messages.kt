@@ -3,6 +3,7 @@ package dev.penlink.protocol
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.booleanOrNull
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.intOrNull
 import kotlinx.serialization.json.jsonObject
@@ -26,12 +27,14 @@ data class InfoResponse(val hostName: String, val version: String)
 
 /** Phone -> host WebSocket messages (SPEC "Protocol"). Each returns the JSON text frame. */
 object WsOut {
-    fun open(appId: String, width: Int, height: Int, scale: Double): String = obj {
+    /** [attach]: re-open after a lost connection; the host attaches to the running app instead of launching it. */
+    fun open(appId: String, width: Int, height: Int, scale: Double, attach: Boolean = false): String = obj {
         put("type", "open")
         put("appId", appId)
         put("width", width)
         put("height", height)
         put("scale", scale)
+        if (attach) put("attach", true)
     }
 
     fun answer(sessionId: String, sdp: String): String = obj {
@@ -72,6 +75,8 @@ sealed interface WsIn {
     data class Opened(val sessionId: String, val appId: String, val title: String) : WsIn
     /** Window title became known or changed (sent after `opened`). */
     data class Title(val sessionId: String, val title: String) : WsIn
+    /** Real PC window size; [fitted] = shrunk to fit the PC screen (video is upscaled). */
+    data class Window(val sessionId: String, val width: Int, val height: Int, val fitted: Boolean) : WsIn
     data class Offer(val sessionId: String, val sdp: String) : WsIn
     data class Ice(val sessionId: String, val candidate: String, val sdpMid: String?, val sdpMLineIndex: Int) : WsIn
     data class Closed(val sessionId: String, val reason: String) : WsIn
@@ -89,6 +94,12 @@ object WsParser {
         return when (s("type")) {
             "opened" -> WsIn.Opened(s("sessionId") ?: return null, s("appId") ?: "", s("title") ?: "")
             "title" -> WsIn.Title(s("sessionId") ?: return null, s("title") ?: return null)
+            "window" -> WsIn.Window(
+                s("sessionId") ?: return null,
+                (o["width"] as? JsonPrimitive)?.intOrNull ?: return null,
+                (o["height"] as? JsonPrimitive)?.intOrNull ?: return null,
+                (o["fitted"] as? JsonPrimitive)?.booleanOrNull ?: false,
+            )
             "offer" -> WsIn.Offer(s("sessionId") ?: return null, s("sdp") ?: return null)
             "ice" -> WsIn.Ice(
                 s("sessionId") ?: return null,

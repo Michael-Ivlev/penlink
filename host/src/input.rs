@@ -345,11 +345,13 @@ pub struct Shared {
     pub video_w: AtomicU32,
     pub video_h: AtomicU32,
     pub target: InputTarget,
+    /// Latency records for the phone's debug overlay (see `latency`).
+    pub lat_tx: std::sync::Mutex<Option<tokio::sync::mpsc::UnboundedSender<String>>>,
 }
 
 impl Shared {
     pub fn new(w: u32, h: u32, target: InputTarget) -> Arc<Self> {
-        Arc::new(Self { video_w: AtomicU32::new(w), video_h: AtomicU32::new(h), target })
+        Arc::new(Self { video_w: AtomicU32::new(w), video_h: AtomicU32::new(h), target, lat_tx: std::sync::Mutex::new(None) })
     }
     pub fn video(&self) -> (i32, i32) {
         (self.video_w.load(Ordering::Relaxed) as i32, self.video_h.load(Ordering::Relaxed) as i32)
@@ -455,16 +457,18 @@ impl Injector {
         if self.shared.target.has_focus() {
             return true;
         }
-        if self.last_focus_try.elapsed() <= std::time::Duration::from_millis(250) {
+        // A press that finds the window not in front retries at once (a dropped press is a lost
+        // tap); the limit only keeps a stream of moves from hammering SetForegroundWindow.
+        if self.last_focus_try.elapsed() <= std::time::Duration::from_millis(40) {
             return false;
         }
         self.last_focus_try = std::time::Instant::now();
         self.shared.target.focus();
-        for _ in 0..5 {
+        for _ in 0..6 {
             if self.shared.target.has_focus() {
                 return true;
             }
-            std::thread::sleep(std::time::Duration::from_millis(10));
+            std::thread::sleep(std::time::Duration::from_millis(2));
         }
         tracing::debug!("window {:#x} is not in the foreground; input dropped", self.shared.target.main_hwnd());
         false
@@ -479,7 +483,7 @@ impl Injector {
     }
 
     pub fn handle(&mut self, msg: InputMsg) {
-        tracing::debug!("input {msg:?}");
+        tracing::trace!("input {msg:?}");
         if !is_window(self.shared.target.main_hwnd()) {
             return;
         }
@@ -491,6 +495,7 @@ impl Injector {
             InputMsg::Wheel { dx, dy } => self.wheel(dx, dy),
             InputMsg::Key { a, vk } => self.key(a, vk),
             InputMsg::Text { s } => self.text(&s),
+            InputMsg::Ping { .. } => {}
         }
     }
 

@@ -399,6 +399,11 @@ fn current_mode(name: &str) -> Option<DEVMODEW> {
     unsafe { EnumDisplaySettingsW(PCWSTR(w.as_ptr()), ENUM_CURRENT_SETTINGS, &mut dm) }.as_bool().then_some(dm)
 }
 
+/// The refresh rate Windows runs a monitor at now.
+pub fn current_hz(name: &str) -> Option<u32> {
+    current_mode(name).map(|d| d.dmDisplayFrequency)
+}
+
 fn active_paths() -> Result<Vec<DISPLAYCONFIG_PATH_INFO>> {
     for _ in 0..4 {
         let (mut np, mut nm) = (0u32, 0u32);

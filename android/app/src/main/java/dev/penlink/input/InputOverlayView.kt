@@ -402,7 +402,9 @@ class InputOverlayView(context: Context) : View(context) {
 
     override fun onTouchEvent(e: MotionEvent): Boolean {
         if (e.actionMasked == MotionEvent.ACTION_DOWN) {
-            // A new gesture: decide who owns it from the first pointer's tool.
+            // A new gesture: deliver its events as they happen, not batched to the next frame (pen, finger, mouse).
+            requestUnbufferedDispatch(e)
+            // Decide who owns it from the first pointer's tool.
             val tool = e.getToolType(0)
             penActive = isPenTool(tool)
             mouseActive = tool == MotionEvent.TOOL_TYPE_MOUSE

@@ -218,6 +218,10 @@ pub enum InputMsg {
         dx: f64,
         dy: f64,
     },
+    /// Clock sync / round trip probe: the host answers `{"t":"pong","c":<c>,"h":<host us>}`.
+    Ping {
+        c: i64,
+    },
     Wheel {
         #[serde(default)]
         dx: f64,

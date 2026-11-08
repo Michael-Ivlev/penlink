@@ -10,11 +10,14 @@ import org.webrtc.IceCandidate
 import org.webrtc.MediaConstraints
 import org.webrtc.MediaStream
 import org.webrtc.PeerConnection
+import org.webrtc.RTCStatsCollectorCallback
 import org.webrtc.RtpReceiver
 import org.webrtc.RtpTransceiver
 import org.webrtc.SdpObserver
 import org.webrtc.SessionDescription
 import org.webrtc.VideoTrack
+import android.os.Handler
+import android.os.Looper
 import java.nio.ByteBuffer
 
 /**
@@ -76,8 +79,18 @@ class RemoteSession(
     /** Real PC window size as last reported by the host (null until the first `window` message). */
     val windowSize = MutableStateFlow<WindowSize?>(null)
 
+    /** Debug readout of where the touch-to-pixel time goes (shown by the session screen's latency overlay). */
+    val latency = LatencyStats()
+
     private var pc: PeerConnection? = null
     private var dc: DataChannel? = null
+
+    /** Unordered, unreliable channel for pointer moves (the host opens it next to `input`). */
+    private var pdc: DataChannel? = null
+    private var moveSeq = 0L
+    private var holdsWifiLock = false
+    private val ui = Handler(Looper.getMainLooper())
+    private var statsLoop: Runnable? = null
     private val pendingRemoteIce = ArrayList<IceCandidate>()
     private var remoteSet = false
 
@@ -134,6 +147,10 @@ class RemoteSession(
             return
         }
         pc = conn
+        if (!holdsWifiLock) {
+            holdsWifiLock = true
+            rtc.acquireLowLatencyWifi()
+        }
         conn.setRemoteDescription(object : SimpleSdp() {
             override fun onSetSuccess() {
                 synchronized(pendingRemoteIce) {
@@ -199,12 +216,59 @@ class RemoteSession(
 
     /** Send one `input` data-channel JSON message. Returns false when the channel is not open. */
     fun sendInput(json: String): Boolean {
+        // Pointer moves: a lost or late one is replaced by the next, so they take the unreliable channel and
+        // never wait behind a retransmission; presses, releases and keys stay reliable and ordered.
+        val pch = pdc
+        if (pch != null && isPointerMove(json) && pch.state() == DataChannel.State.OPEN) {
+            val tagged = "{\"n\":${++moveSeq}," + json.substring(1)
+            if (pch.send(DataChannel.Buffer(ByteBuffer.wrap(tagged.toByteArray(Charsets.UTF_8)), false))) return true
+        }
         val ch = dc ?: return false
         if (ch.state() != DataChannel.State.OPEN) return false
         return ch.send(DataChannel.Buffer(ByteBuffer.wrap(json.toByteArray(Charsets.UTF_8)), false))
     }
 
+    private fun isPointerMove(j: String) =
+        j.startsWith("{\"t\":\"pen\",\"a\":\"move\"") || j.startsWith("{\"t\":\"pen\",\"a\":\"hover\"") ||
+            j.startsWith("{\"t\":\"touch\",\"a\":\"move\"") || j.startsWith("{\"t\":\"mouse\",\"a\":\"move\"")
+
+    /** While the overlay is on: ping the host and read the WebRTC stats once a second. */
+    private fun startStatsLoop() {
+        if (statsLoop != null) return
+        val r = object : Runnable {
+            override fun run() {
+                val conn = pc ?: run { statsLoop = null; return }
+                if (rtc.latencyOverlay.value) {
+                    sendInput(latency.pingJson())
+                    conn.getStats(RTCStatsCollectorCallback { latency.onStats(it) })
+                }
+                ui.postDelayed(this, 1000)
+            }
+        }
+        statsLoop = r
+        ui.postDelayed(r, 1000)
+    }
+
+    private val inputObserver = object : DataChannel.Observer {
+        override fun onBufferedAmountChange(previousAmount: Long) {}
+        override fun onStateChange() {}
+        override fun onMessage(buffer: DataChannel.Buffer) {
+            if (buffer.binary) return
+            val bytes = ByteArray(buffer.data.remaining())
+            buffer.data.get(bytes)
+            latency.onMessage(String(bytes, Charsets.UTF_8))
+        }
+    }
+
     private fun release() {
+        statsLoop?.let { ui.removeCallbacks(it) }
+        statsLoop = null
+        if (holdsWifiLock) {
+            holdsWifiLock = false
+            rtc.releaseLowLatencyWifi()
+        }
+        runCatching { pdc?.unregisterObserver(); pdc?.close() }
+        pdc = null
         runCatching { dc?.unregisterObserver(); dc?.close() }
         runCatching { pc?.close() }
         dc = null
@@ -220,6 +284,7 @@ class RemoteSession(
                 PeerConnection.IceConnectionState.COMPLETED -> {
                     if (_status.value !is SessionStatus.Closed) _status.value = SessionStatus.Live
                     requestKeyframe()
+                    startStatsLoop()
                 }
                 PeerConnection.IceConnectionState.FAILED ->
                     if (_status.value !is SessionStatus.Closed) {
@@ -240,7 +305,13 @@ class RemoteSession(
         override fun onAddStream(stream: MediaStream) {}
         override fun onRemoveStream(stream: MediaStream) {}
         override fun onDataChannel(channel: DataChannel) {
-            if (channel.label() == "input") dc = channel
+            when (channel.label()) {
+                "input" -> {
+                    dc = channel
+                    channel.registerObserver(inputObserver)
+                }
+                "pointer" -> pdc = channel
+            }
         }
 
         override fun onRenegotiationNeeded() {}

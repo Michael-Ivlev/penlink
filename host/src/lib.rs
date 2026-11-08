@@ -7,6 +7,7 @@ pub mod encode;
 pub mod frame;
 pub mod geom;
 pub mod input;
+pub mod latency;
 pub mod launcher;
 pub mod netfilter;
 pub mod pipeline;

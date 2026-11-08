@@ -38,7 +38,7 @@ use windows::Win32::System::WinRT::Graphics::Capture::IGraphicsCaptureItemIntero
 use windows::Win32::System::WinRT::{RoInitialize, RO_INIT_MULTITHREADED};
 
 const KEYFRAME_INTERVAL: Duration = Duration::from_secs(4);
-const MIN_FRAME_INTERVAL: Duration = Duration::from_micros(16_000); // ~60 fps cap
+const MIN_FRAME_INTERVAL: Duration = Duration::from_micros(7_500); // ~120 fps cap
 const IDLE_RESEND: Duration = Duration::from_millis(450); // >= ~2 fps even when nothing changes
 
 /// What is captured.
@@ -220,9 +220,12 @@ fn run(
     let pool = Direct3D11CaptureFramePool::CreateFreeThreaded(&d3d_dev, fmt, 3, pool_size)?;
     let (tx, rx) = channel::<()>();
     let closed = Arc::new(AtomicBool::new(false));
+    let arrival = Arc::new(AtomicU64::new(0));
     {
         let tx = tx.clone();
+        let arrival = arrival.clone();
         pool.FrameArrived(&TypedEventHandler::new(move |_, _| {
+            arrival.store(crate::latency::now_us(), Ordering::SeqCst);
             let _ = tx.send(());
             Ok(())
         }))?;
@@ -241,6 +244,10 @@ fn run(
         tracing::debug!("could not disable capture border: {e}");
     }
     let _ = session.SetIsCursorCaptureEnabled(true);
+    // Deliver every composed frame at once (the default throttles to the monitor's refresh interval).
+    if let Err(e) = session.SetMinUpdateInterval(windows::Foundation::TimeSpan { Duration: 10_000 }) {
+        tracing::debug!("could not set the capture update interval: {e}");
+    }
     session.StartCapture()?;
     tracing::info!("capture started for {target:?}, item size {}x{}", pool_size.Width, pool_size.Height);
 
@@ -260,6 +267,8 @@ fn run(
     let mut dirty = false; // new frame converted but not yet encoded
     let mut last_stats = Instant::now();
     let mut encode_errors = 0u32;
+    let playout = [webrtc::rtp::extension::HeaderExtension::PlayoutDelay(webrtc::rtp::extension::playout_delay_extension::PlayoutDelayExtension { min_delay: 0, max_delay: 0 })];
+    let mut frame_arrived_us = 0u64;
 
     loop {
         if ctl.stop.load(Ordering::SeqCst) {
@@ -309,6 +318,15 @@ fn run(
             }
         }
 
+        // Frame-rate cap: wait BEFORE taking the newest frame, so what is encoded is as fresh as
+        // possible (the frames that arrive meanwhile replace each other in the pool).
+        if (signalled || dirty) && !ctl.want_keyframe.load(Ordering::SeqCst) {
+            let since = last_encode.elapsed();
+            if since < MIN_FRAME_INTERVAL {
+                std::thread::sleep(MIN_FRAME_INTERVAL - since);
+            }
+        }
+
         // Pull the newest captured frame (drop older ones).
         let mut newest = None;
         while let Ok(f) = pool.TryGetNextFrame() {
@@ -316,6 +334,7 @@ fn run(
         }
         let mut converted = false;
         if let Some(frame) = newest {
+            frame_arrived_us = arrival.load(Ordering::SeqCst);
             let content = frame.ContentSize()?;
             let t0 = Instant::now();
             let surface = frame.Surface()?;
@@ -353,7 +372,6 @@ fn run(
             }
             dirty = true;
         }
-        let _ = signalled;
 
         if !have_frame {
             continue;
@@ -363,19 +381,12 @@ fn run(
         if !(dirty || idle_due || key_due || ctl.want_keyframe.load(Ordering::SeqCst)) {
             continue;
         }
-        // Frame-rate cap: leave `dirty` set so the newest content goes out right after.
-        if converted || dirty {
-            let since = last_encode.elapsed();
-            if since < MIN_FRAME_INTERVAL && !ctl.want_keyframe.load(Ordering::SeqCst) {
-                std::thread::sleep(MIN_FRAME_INTERVAL - since);
-            }
-        }
-
         if ctl.want_keyframe.swap(false, Ordering::SeqCst) || key_due {
             enc.force_keyframe();
             last_idr = Instant::now();
         }
         let t1 = Instant::now();
+        let enc_start_us = crate::latency::now_us();
         let out = match enc.encode(&yuv) {
             Ok(o) => {
                 encode_errors = 0;
@@ -399,6 +410,7 @@ fn run(
         ctl.stats.encode_us.fetch_add(t1.elapsed().as_micros() as u64, Ordering::Relaxed);
         last_encode = Instant::now();
         dirty = false;
+        let enc_end_us = crate::latency::now_us();
         if let Some(e) = out {
             let now = Instant::now();
             let dur = now.duration_since(last_sample).clamp(Duration::from_millis(1), Duration::from_secs(1));
@@ -406,8 +418,25 @@ fn run(
             ctl.stats.frames.fetch_add(1, Ordering::Relaxed);
             ctl.stats.bytes.fetch_add(e.data.len() as u64, Ordering::Relaxed);
             let sample = Sample { data: Bytes::from(e.data), duration: dur, ..Default::default() };
-            if let Err(err) = rt.block_on(track.write_sample(&sample)) {
+            if let Err(err) = rt.block_on(track.write_sample_with_extensions(&sample, &playout)) {
                 tracing::debug!("write_sample: {err}");
+            }
+            let st = crate::latency::FrameStages {
+                arrived_us: frame_arrived_us,
+                encode_start_us: enc_start_us,
+                encode_end_us: enc_end_us,
+                sent_us: crate::latency::now_us(),
+            };
+            if let Some(rec) = crate::latency::PROBE.frame_sent(st) {
+                tracing::debug!(
+                    target: "penlink_host::latency",
+                    "host stages: recv->inject {:.1} ms, inject->capture {:.1} ms, capture->encode {:.1} ms, encode {:.1} ms, send {:.1} ms, total {:.1} ms",
+                    rec.recv_to_inject as f64 / 1e3, rec.inject_to_capture as f64 / 1e3, rec.capture_to_encode_start as f64 / 1e3,
+                    rec.encode as f64 / 1e3, rec.send as f64 / 1e3, rec.total_us() as f64 / 1e3
+                );
+                if let Some(tx) = shared.lat_tx.lock().unwrap().as_ref() {
+                    let _ = tx.send(rec.json());
+                }
             }
         }
         if last_stats.elapsed() >= Duration::from_secs(5) {

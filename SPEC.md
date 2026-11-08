@@ -180,6 +180,19 @@ Host → phone:
 
 Order for one `open`: `opened` → (`title`) → `window` → `offer` → `ice`*, or `opened` → `closed`.
 
+### Latency (input responsiveness)
+- The host sends RTP header extension playout-delay min=max=0 on every video frame (the phone decodes and shows
+  each frame at once, no smoothing buffer; measured on the emulator: jitter buffer 274 ms -> 0.8 ms) and opens a second
+  data channel `pointer` (unordered, maxRetransmits 0). The phone sends pen/touch/mouse `move`/`hover` on it with an extra
+  field `n` (counts up; the host drops a move older than one it already handled); everything else stays on `input`.
+- `{"t":"ping","c":<phone µs>}` on `input` -> host answers `{"t":"pong","c":<same>,"h":<host µs>}` at once.
+- Host -> phone `{"t":"lat","inj":..,"cap":..,"conv":..,"enc":..,"snd":..}` (µs, once per input event): input received ->
+  injected, injected -> frame captured, captured -> encode start, encode, write to the track. The phone's debug overlay
+  (debug builds, `--ez latency true|false`) adds RTT, jitter buffer and decode time from the WebRTC stats.
+  `penlink-host --verbose` with `RUST_LOG=penlink_host::latency=debug` logs the same stages.
+- Measuring: `examples/latprobe.rs` (loopback client) sends a mouse-down and times it until a decoded frame shows
+  testpad's flash strip flip (testpad flips the bottom strip on every key, click and pointer-down).
+
 ### Data channel `input` (ordered, reliable, JSON text)
 All `x`,`y` are normalised 0..1 over the video frame (0,0 = top-left).
 - Pen: `{"t":"pen","a":"hover|down|move|up|leave","x":0.5,"y":0.5,"p":0.6,"tx":10,"ty":-5,"b":0,"e":false}`

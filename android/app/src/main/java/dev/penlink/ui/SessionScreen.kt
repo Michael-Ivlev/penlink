@@ -278,6 +278,8 @@ fun SessionScreen(app: PenlinkApp, conn: HostConnection, selectedId: Long) {
         }
         }
 
+        LatencyOverlay(current, app.rtc)
+
         // Hidden text sink for the phone's keyboard.
         AndroidView(
             factory = { ctx -> ImeCaptureView(ctx).also { imeRef = it } },

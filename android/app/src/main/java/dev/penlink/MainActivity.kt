@@ -7,6 +7,7 @@ import android.os.Bundle
 import android.widget.Toast
 import androidx.lifecycle.lifecycleScope
 import dev.penlink.data.Quality
+import dev.penlink.data.SavedHost
 import dev.penlink.data.StreamPrefs
 import dev.penlink.protocol.AppEntry
 import kotlinx.coroutines.flow.first
@@ -64,12 +65,19 @@ class MainActivity : ComponentActivity() {
      * test window that is not in the Start Menu).
      */
     private fun handleDebugIntent(intent: Intent?) {
+        // `--ez latency true|false` shows or hides the latency overlay (on by default in debug builds).
+        if (intent?.hasExtra("latency") == true) (application as PenlinkApp).rtc.latencyOverlay.value = intent.getBooleanExtra("latency", true)
         if (applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE == 0) return
         val appId = intent?.getStringExtra("openAppId")?.takeIf { it.isNotBlank() } ?: return
         intent.removeExtra("openAppId")
         val app = application as PenlinkApp
         lifecycleScope.launch {
             val want = intent.getStringExtra("host")
+            // `--es pairCode 123456` (with --es host) pairs a lab host first, so scripted runs need no typing.
+            val code = intent.getStringExtra("pairCode")
+            if (want != null && code != null) {
+                runCatching { app.api.pair(want, code, "debug") }.onSuccess { app.store.upsert(SavedHost(want, it.hostName, it.token)) }
+            }
             val hosts = app.store.hosts.first()
             val host = if (want != null) hosts.firstOrNull { it.address == want } else hosts.firstOrNull()
             if (host == null) {

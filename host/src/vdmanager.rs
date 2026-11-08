@@ -15,7 +15,13 @@ use std::time::{Duration, Instant};
 /// network blip can attach to it again. After that the monitor is removed and the app window goes
 /// back to the PC (a phone that comes back later gets a new monitor).
 pub const GRACE: Duration = Duration::from_secs(5);
-pub const REFRESH_RATE: u32 = 60;
+/// 120 Hz halves the time between an app drawing and the capture seeing it.
+pub const REFRESH_RATE: u32 = 120;
+
+/// PENLINK_REFRESH overrides it (diagnostics: measuring 60 against 120 Hz).
+fn refresh_rate() -> u32 {
+    std::env::var("PENLINK_REFRESH").ok().and_then(|v| v.parse().ok()).filter(|n| (30..=240).contains(n)).unwrap_or(REFRESH_RATE)
+}
 
 /// A virtual monitor as it is now.
 #[derive(Debug, Clone, PartialEq)]
@@ -131,7 +137,7 @@ impl VdManager {
     /// Add `guid` to the driver, place it, set the DPI. On failure the error carries the GDI
     /// name if the monitor was already added (so the caller removes it again).
     fn setup(&self, guid: &Guid, width: u32, height: u32, dpi_wanted: u32) -> std::result::Result<VMonitor, (anyhow::Error, Option<String>)> {
-        let added = self.backend.add(guid, width, height, REFRESH_RATE).map_err(|e| (e, None))?;
+        let added = self.backend.add(guid, width, height, refresh_rate()).map_err(|e| (e, None))?;
         let gdi = added.gdi_name.clone();
         // Windows remembers the mode a monitor identity had last (a re-added GUID comes back at
         // its old size, e.g. after the phone rotated), whatever the driver was asked for.
@@ -165,6 +171,7 @@ impl VdManager {
                 rect = r;
             }
         }
+        tracing::info!("virtual monitor {gdi}: {}x{} at {} Hz", rect.w, rect.h, crate::vdisplay::current_hz(&gdi).unwrap_or(0));
         Ok(VMonitor { guid: *guid, gdi_name: gdi, hmonitor, rect, dpi_wanted, dpi_actual })
     }
 

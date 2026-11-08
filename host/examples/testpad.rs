@@ -39,15 +39,20 @@ fn xy(lp: LPARAM) -> (i32, i32) {
 unsafe extern "system" fn edit_proc(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
     match msg {
         WM_CHAR => {
+            flash();
             let c = char::from_u32(wp.0 as u32).unwrap_or('?');
             log(&format!("CHAR 0x{:02x} {:?}", wp.0, c));
         }
-        WM_KEYDOWN | WM_SYSKEYDOWN => log(&format!("KEYDOWN vk={}", wp.0)),
+        WM_KEYDOWN | WM_SYSKEYDOWN => { flash(); log(&format!("KEYDOWN vk={}", wp.0)) }
         WM_KEYUP | WM_SYSKEYUP => log(&format!("KEYUP vk={}", wp.0)),
-        WM_LBUTTONDOWN | WM_RBUTTONDOWN | WM_MBUTTONDOWN | WM_LBUTTONUP | WM_RBUTTONUP | WM_MBUTTONUP => {
+        WM_LBUTTONDOWN | WM_RBUTTONDOWN | WM_MBUTTONDOWN | WM_LBUTTONDBLCLK | WM_LBUTTONUP | WM_RBUTTONUP | WM_MBUTTONUP => {
             let (x, y) = xy(lp);
+            if matches!(msg, WM_LBUTTONDOWN | WM_RBUTTONDOWN | WM_MBUTTONDOWN | WM_LBUTTONDBLCLK) {
+                flash();
+            }
             let name = match msg {
                 WM_LBUTTONDOWN => "LBUTTONDOWN",
+                WM_LBUTTONDBLCLK => "LBUTTONDBLCLK",
                 WM_RBUTTONDOWN => "RBUTTONDOWN",
                 WM_MBUTTONDOWN => "MBUTTONDOWN",
                 WM_LBUTTONUP => "LBUTTONUP",
@@ -64,6 +69,9 @@ unsafe extern "system" fn edit_proc(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -
         WM_MOUSEHWHEEL => log(&format!("HWHEEL delta={}", (wp.0 >> 16) as i16)),
         WM_POINTERDOWN | WM_POINTERUPDATE | WM_POINTERUP => {
             let id = (wp.0 & 0xffff) as u32;
+            if msg == WM_POINTERDOWN {
+                flash();
+            }
             let mut ty = POINTER_INPUT_TYPE(0);
             let _ = unsafe { GetPointerType(id, &mut ty) };
             let name = match msg {
@@ -89,6 +97,44 @@ unsafe extern "system" fn edit_proc(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -
     unsafe { CallWindowProcW(Some(std::mem::transmute::<isize, unsafe extern "system" fn(HWND, u32, WPARAM, LPARAM) -> LRESULT>(OLD_EDIT_PROC)), h, msg, wp, lp) }
 }
 
+/// Latency probe: a strip at the bottom of the client area flips between black and white on every
+/// key, character, mouse-button-down and pointer-down, so a capture can see exactly when the
+/// app reacted to an input.
+static FLASH_STATE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+static mut MAIN: HWND = HWND(std::ptr::null_mut());
+
+fn strip_h(h: HWND) -> i32 {
+    let dpi = unsafe { windows::Win32::UI::HiDpi::GetDpiForWindow(h) }.max(96) as i32;
+    48 * dpi / 96
+}
+
+fn paint_strip(h: HWND, dc: windows::Win32::Graphics::Gdi::HDC) {
+    use windows::Win32::Graphics::Gdi::{CreateSolidBrush, DeleteObject, FillRect};
+    use windows::Win32::Foundation::COLORREF;
+    unsafe {
+        let mut r = RECT::default();
+        let _ = GetClientRect(h, &mut r);
+        r.top = r.bottom - strip_h(h);
+        let on = FLASH_STATE.load(std::sync::atomic::Ordering::SeqCst);
+        let br = CreateSolidBrush(COLORREF(if on { 0x00ff_ffff } else { 0 }));
+        FillRect(dc, &r, br);
+        let _ = DeleteObject(br.into());
+    }
+}
+
+fn flash() {
+    use windows::Win32::Graphics::Gdi::{GetDC, ReleaseDC};
+    FLASH_STATE.fetch_xor(true, std::sync::atomic::Ordering::SeqCst);
+    unsafe {
+        let m = MAIN;
+        if !m.0.is_null() {
+            let dc = GetDC(Some(m));
+            paint_strip(m, dc);
+            ReleaseDC(Some(m), dc);
+        }
+    }
+}
+
 static mut EDIT: HWND = HWND(std::ptr::null_mut());
 static mut BUTTON: HWND = HWND(std::ptr::null_mut());
 
@@ -108,7 +154,7 @@ fn layout(h: HWND) {
             let _ = MoveWindow(b, 0, 0, r.right, bh, true);
         }
         if !e.0.is_null() {
-            let _ = MoveWindow(e, 0, bh, r.right, (r.bottom - bh).max(1), true);
+            let _ = MoveWindow(e, 0, bh, r.right, (r.bottom - bh - strip_h(h)).max(1), true);
         }
     }
 }
@@ -120,6 +166,14 @@ unsafe extern "system" fn main_proc(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -
             let _ = unsafe { GetClientRect(h, &mut r) };
             log(&format!("SIZE client={}x{}", r.right, r.bottom));
             layout(h);
+            LRESULT(0)
+        }
+        WM_PAINT => {
+            use windows::Win32::Graphics::Gdi::{BeginPaint, EndPaint, PAINTSTRUCT};
+            let mut ps = PAINTSTRUCT::default();
+            let dc = unsafe { BeginPaint(h, &mut ps) };
+            paint_strip(h, dc);
+            unsafe { let _ = EndPaint(h, &ps); }
             LRESULT(0)
         }
         WM_DPICHANGED => {
@@ -196,6 +250,7 @@ fn main() {
             None,
         )
         .unwrap();
+        MAIN = hwnd;
         let menu = CreateMenu().unwrap();
         let sub_menu = CreatePopupMenu().unwrap();
         let _ = AppendMenuW(sub_menu, MF_STRING, ID_HELLO, w!("Say hello"));

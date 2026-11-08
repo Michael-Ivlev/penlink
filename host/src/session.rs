@@ -33,19 +33,21 @@ use webrtc::peer_connection::RTCPeerConnection;
 use webrtc::rtcp::payload_feedbacks::full_intra_request::FullIntraRequest;
 use webrtc::rtcp::payload_feedbacks::picture_loss_indication::PictureLossIndication;
 use webrtc::rtp_transceiver::RTCPFeedback;
+use webrtc::rtp_transceiver::rtp_codec::RTCRtpHeaderExtensionCapability;
 use webrtc::rtp_transceiver::rtp_codec::{RTCRtpCodecCapability, RTCRtpCodecParameters, RTPCodecType};
 use webrtc::rtp_transceiver::rtp_transceiver_direction::RTCRtpTransceiverDirection;
 use webrtc::rtp_transceiver::RTCRtpTransceiverInit;
 use webrtc::track::track_local::track_local_static_sample::TrackLocalStaticSample;
 use webrtc::track::track_local::TrackLocal;
 
+pub const PLAYOUT_DELAY_URI: &str = "http://www.webrtc.org/experiments/rtp-hdrext/playout-delay";
 pub const H264_FMTP: &str = "level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42e01f";
 /// Fixed UDP range for ICE so a firewall rule is easy to write.
 pub const ICE_UDP_MIN: u16 = 47801;
 pub const ICE_UDP_MAX: u16 = 48800;
 
 pub enum InputCmd {
-    Msg(InputMsg),
+    Msg(InputMsg, u64),
     Stop,
 }
 
@@ -208,6 +210,15 @@ impl Session {
             RTCRtpCodecParameters { capability: h264_capability(), payload_type: 102, ..Default::default() },
             RTPCodecType::Video,
         )?;
+        // Playout delay 0..0: the phone shows each frame as soon as it is decoded (no smoothing buffer).
+        // (PENLINK_NO_PLAYOUT_DELAY=1 leaves it out, to measure what it is worth.)
+        if std::env::var_os("PENLINK_NO_PLAYOUT_DELAY").is_none() {
+            media.register_header_extension(
+                RTCRtpHeaderExtensionCapability { uri: PLAYOUT_DELAY_URI.to_owned() },
+                RTPCodecType::Video,
+                None,
+            )?;
+        }
         let mut registry = Registry::new();
         registry = register_default_interceptors(registry, &mut media)?;
         let mut se = SettingEngine::default();
@@ -241,6 +252,20 @@ impl Session {
             .create_data_channel("input", Some(RTCDataChannelInit { ordered: Some(true), ..Default::default() }))
             .await?;
 
+        // --- latency records -> phone debug overlay
+        {
+            let (lat_tx, mut lat_rx) = unbounded_channel::<String>();
+            *shared.lat_tx.lock().unwrap() = Some(lat_tx);
+            let dc3 = dc.clone();
+            tokio::spawn(async move {
+                while let Some(j) = lat_rx.recv().await {
+                    if dc3.ready_state() == webrtc::data_channel::data_channel_state::RTCDataChannelState::Open {
+                        let _ = dc3.send_text(j).await;
+                    }
+                }
+            });
+        }
+
         // --- input thread
         let (input_tx, input_rx) = std_mpsc::channel::<InputCmd>();
         let input_thread = {
@@ -249,7 +274,10 @@ impl Session {
                 let mut inj = Injector::new(shared);
                 while let Ok(cmd) = input_rx.recv() {
                     match cmd {
-                        InputCmd::Msg(m) => inj.handle(m),
+                        InputCmd::Msg(m, recv_us) => {
+                            inj.handle(m);
+                            crate::latency::PROBE.injected(recv_us);
+                        }
                         InputCmd::Stop => break,
                     }
                 }
@@ -260,15 +288,44 @@ impl Session {
             tracing::info!("input data channel open");
             Box::pin(async {})
         }));
-        {
+        // Pointer moves go on their own unordered, unreliable channel: a lost or late move is
+        // replaced by the next one and must not hold up the clicks and keys behind it.
+        let dc_ptr = pc
+            .create_data_channel("pointer", Some(RTCDataChannelInit { ordered: Some(false), max_retransmits: Some(0), ..Default::default() }))
+            .await?;
+        dc_ptr.on_open(Box::new(|| {
+            tracing::info!("pointer data channel open");
+            Box::pin(async {})
+        }));
+        for (chan, unreliable) in [(dc.clone(), false), (dc_ptr.clone(), true)] {
             let tx = input_tx.clone();
-            dc.on_message(Box::new(move |msg: DataChannelMessage| {
+            let dc2 = chan.clone();
+            let last_n = Arc::new(std::sync::atomic::AtomicU64::new(0));
+            chan.on_message(Box::new(move |msg: DataChannelMessage| {
+                let recv_us = crate::latency::now_us();
                 let tx = tx.clone();
+                let dc2 = dc2.clone();
+                let last_n = last_n.clone();
                 Box::pin(async move {
+                    if unreliable {
+                        // `n` counts the moves the phone sent; one that arrives after a newer one is stale.
+                        #[derive(serde::Deserialize)]
+                        struct Seq {
+                            n: Option<u64>,
+                        }
+                        if let Ok(Seq { n: Some(n) }) = serde_json::from_slice::<Seq>(&msg.data) {
+                            if last_n.fetch_max(n, Ordering::SeqCst) > n {
+                                return;
+                            }
+                        }
+                    }
                     match std::str::from_utf8(&msg.data).map(serde_json::from_str::<InputMsg>) {
+                        Ok(Ok(InputMsg::Ping { c })) => {
+                            let _ = dc2.send_text(format!("{{\"t\":\"pong\",\"c\":{c},\"h\":{}}}", crate::latency::now_us())).await;
+                        }
                         Ok(Ok(m)) => {
                             tracing::trace!("input {m:?}");
-                            let _ = tx.send(InputCmd::Msg(m));
+                            let _ = tx.send(InputCmd::Msg(m, recv_us));
                         }
                         Ok(Err(e)) => tracing::debug!("bad input message: {e}"),
                         Err(_) => tracing::debug!("non-utf8 input message"),

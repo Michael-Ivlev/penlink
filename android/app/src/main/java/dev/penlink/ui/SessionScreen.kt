@@ -157,6 +157,7 @@ fun SessionScreen(app: PenlinkApp, conn: HostConnection, selectedId: Long) {
     BackHandler { minimize() }
 
     var trackpad by remember { mutableStateOf(false) }
+    val palmRejection by app.rtc.palmRejection.collectAsState()
     var barVisible by remember { mutableStateOf(false) }
     var activity_ticks by remember { mutableIntStateOf(0) }
     var showSettings by remember { mutableStateOf(false) }
@@ -277,6 +278,7 @@ fun SessionScreen(app: PenlinkApp, conn: HostConnection, selectedId: Long) {
                 update = { o ->
                     o.sink = { json -> current.sendInput(json) }
                     o.trackpad = trackpad
+                    o.palmRejection = palmRejection
                     o.videoW = videoSize.first
                     o.videoH = videoSize.second
                 },

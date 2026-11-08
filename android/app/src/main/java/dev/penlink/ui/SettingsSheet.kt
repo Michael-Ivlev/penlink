@@ -140,6 +140,16 @@ fun SettingsSheet(app: PenlinkApp, conn: HostConnection, session: RemoteSession,
                 )
             }
 
+            SettingsGroup("Pen") {
+                val palmOn by app.rtc.palmRejection.collectAsState()
+                SwitchRow(
+                    title = "Palm rejection",
+                    checked = palmOn,
+                    description = "While the S Pen is near the screen, and for a moment after, fingers and your palm send nothing to the PC.",
+                    onChange = { haptics.toggle(it); app.rtc.setPalmRejection(it) },
+                )
+            }
+
             val win by session.windowSize.collectAsState()
             val size by session.requestedSize.collectAsState()
             SettingsGroup("Connection") {

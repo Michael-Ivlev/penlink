@@ -24,6 +24,14 @@ class Rtc(context: Context) {
         uiPrefs.edit().putBoolean("latencyOverlay", on).apply()
     }
 
+    /** Palm rejection: fingers send nothing while the S Pen is near or touching, and for a moment after. On by default (saved). */
+    val palmRejection = MutableStateFlow(uiPrefs.getBoolean("palmRejection", true))
+
+    fun setPalmRejection(on: Boolean) {
+        palmRejection.value = on
+        uiPrefs.edit().putBoolean("palmRejection", on).apply()
+    }
+
     /**
      * Holds the Wi-Fi radio in its low-latency mode (no power-save batching of packets, which on a phone is what
      * turns a 3 ms link into 30-70 ms pings) while at least one stream is open.

@@ -42,6 +42,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import dev.penlink.PenlinkApp
 import dev.penlink.Screen
+import dev.penlink.data.StreamPrefs
 import dev.penlink.protocol.AppEntry
 import dev.penlink.rtc.HostConnection
 import dev.penlink.windowPixels
@@ -50,7 +51,7 @@ import dev.penlink.windowPixels
 fun AppsScreen(app: PenlinkApp, conn: HostConnection) {
     val activity = LocalActivity.current
     val sessions by conn.sessions.collectAsState()
-    val scale by app.store.defaultScale.collectAsState(initial = 2.0)
+    val prefs by app.store.streamPrefs(conn.host.address).collectAsState(initial = StreamPrefs())
     var apps by remember(conn) { mutableStateOf<List<AppEntry>?>(null) }
     var error by remember(conn) { mutableStateOf<String?>(null) }
     var reload by remember { mutableStateOf(0) }
@@ -118,7 +119,7 @@ fun AppsScreen(app: PenlinkApp, conn: HostConnection) {
                     items(shown, key = { it.id }) { a ->
                         AppTile(app, conn, a) {
                             val (w, h) = activity?.windowPixels() ?: (1080 to 2340)
-                            val s = conn.open(a, w, h, scale)
+                            val s = conn.open(a, w, h, prefs)
                             app.navigate(Screen.Session(s.localId))
                         }
                     }

@@ -16,7 +16,9 @@ data class SavedHost(val address: String, val name: String, val token: String)
 
 private val Context.dataStore by preferencesDataStore(name = "penlink")
 private val HOSTS_KEY = stringPreferencesKey("hosts")
-private val SCALE_KEY = stringPreferencesKey("default_scale")
+
+/** Stream settings are remembered per PC (key `stream:<address>`). */
+private fun streamKey(address: String) = stringPreferencesKey("stream:$address")
 
 class HostStore(private val context: Context) {
     private val json = Json { ignoreUnknownKeys = true }
@@ -26,7 +28,8 @@ class HostStore(private val context: Context) {
         prefs[HOSTS_KEY]?.let { runCatching { json.decodeFromString(ser, it) }.getOrNull() } ?: emptyList()
     }
 
-    val defaultScale: Flow<Double> = context.dataStore.data.map { it[SCALE_KEY]?.toDoubleOrNull() ?: 2.0 }
+    fun streamPrefs(address: String): Flow<StreamPrefs> =
+        context.dataStore.data.map { StreamPrefs.decode(it[streamKey(address)]) }
 
     suspend fun upsert(host: SavedHost) {
         context.dataStore.edit { prefs ->
@@ -43,7 +46,7 @@ class HostStore(private val context: Context) {
         }
     }
 
-    suspend fun setDefaultScale(scale: Double) {
-        context.dataStore.edit { it[SCALE_KEY] = scale.toString() }
+    suspend fun setStreamPrefs(address: String, prefs: StreamPrefs) {
+        context.dataStore.edit { it[streamKey(address)] = prefs.encode() }
     }
 }

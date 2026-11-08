@@ -1,5 +1,6 @@
 package dev.penlink.rtc
 
+import dev.penlink.data.StreamPrefs
 import dev.penlink.protocol.WsOut
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -16,8 +17,16 @@ import org.webrtc.SessionDescription
 import org.webrtc.VideoTrack
 import java.nio.ByteBuffer
 
-/** Real size of the PC window (client area, PC pixels); [fitted] = shrunk to fit the PC screen. */
-data class WindowSize(val width: Int, val height: Int, val fitted: Boolean)
+/**
+ * What the host streams, as last reported: the size in PC pixels, [fitted] = a window shrunk to fit the PC screen,
+ * [mode] "window" or "monitor" (a virtual monitor), [dpi] = the Windows DPI percent applied in monitor mode.
+ */
+data class WindowSize(
+    val width: Int, val height: Int, val fitted: Boolean,
+    val mode: String = "window", val dpi: Int? = null,
+) {
+    val isMonitor: Boolean get() = mode == "monitor"
+}
 
 sealed interface SessionStatus {
     data object Opening : SessionStatus
@@ -39,7 +48,7 @@ class RemoteSession(
     val appName: String,
     width: Int,
     height: Int,
-    scale: Double,
+    prefs: StreamPrefs,
     private val rtc: Rtc,
     private val send: (String) -> Boolean,
 ) {
@@ -60,7 +69,9 @@ class RemoteSession(
     val videoSize = MutableStateFlow(0 to 0)
 
     val requestedSize = MutableStateFlow(width to height)
-    val scale = MutableStateFlow(scale)
+
+    /** Quality and UI size of this session (changed from the settings sheet). */
+    val prefs = MutableStateFlow(prefs)
 
     /** Real PC window size as last reported by the host (null until the first `window` message). */
     val windowSize = MutableStateFlow<WindowSize?>(null)
@@ -79,7 +90,8 @@ class RemoteSession(
         if (_status.value is SessionStatus.Closed) return false
         _status.value = SessionStatus.Opening
         val (w, h) = requestedSize.value
-        return send(WsOut.open(appId, w, h, scale.value, attach = launchedBefore))
+        val p = prefs.value
+        return send(WsOut.open(appId, w, h, p.scaleFactor, attach = launchedBefore, quality = p.quality.wire, uiScale = p.uiScale))
     }
 
     /** The WebSocket dropped: forget the host-side session and peer connection, wait for the link. */
@@ -95,8 +107,8 @@ class RemoteSession(
         _status.value = SessionStatus.Reconnecting
     }
 
-    fun onWindow(width: Int, height: Int, fitted: Boolean) {
-        windowSize.value = WindowSize(width, height, fitted)
+    fun onWindow(width: Int, height: Int, fitted: Boolean, mode: String = "window", dpi: Int? = null) {
+        windowSize.value = WindowSize(width, height, fitted, mode, dpi)
     }
 
     fun onOpened(id: String, title: String) {
@@ -160,10 +172,22 @@ class RemoteSession(
         sessionId?.let { send(WsOut.keyframe(it)) }
     }
 
-    fun resize(width: Int, height: Int, scale: Double) {
+    /** The screen area changed (rotation, keyboard): ask the host for the new size. */
+    fun resize(width: Int, height: Int) {
         requestedSize.value = width to height
-        this.scale.value = scale
-        sessionId?.let { send(WsOut.resize(it, width, height, scale)) }
+        sendResize()
+    }
+
+    /** Quality or UI size changed in the settings sheet. */
+    fun setPrefs(p: StreamPrefs) {
+        prefs.value = p
+        sendResize()
+    }
+
+    private fun sendResize() {
+        val (w, h) = requestedSize.value
+        val p = prefs.value
+        sessionId?.let { send(WsOut.resize(it, w, h, p.scaleFactor, p.quality.wire, p.uiScale)) }
     }
 
     /** Local close: tell the host and free the peer connection. */

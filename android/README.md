@@ -42,8 +42,13 @@ Strip buttons: new app, tabs (x closes), direct/trackpad mode, reset zoom, UI sc
 - If the connection drops (host restart, network) the tabs show "Reconnecting" and come back by themselves
   (apps are re-attached, not relaunched; tabs whose app has exited are removed). After 30 s a message with
   a Retry button appears.
-- Settings sheet: UI scale. If the PC screen is too small for the requested window size the sheet says so
-  (the picture is then upscaled and looks soft; a higher UI scale makes the PC window smaller, so it fits).
+- Settings sheet: Quality (Sharp = phone resolution, Fast = half resolution upscaled) and UI size (100-400 %,
+  Windows' DPI steps; default 300 %), remembered per PC. It also shows what the PC streams: "Virtual monitor"
+  with the DPI Windows really applied, or "The app's window" when the PC has no SudoVDA driver (menus and
+  dialogs outside the window then do not show). In window mode, if the PC screen is too small the sheet says
+  so (a higher UI size makes the window smaller, so it fits).
+- The session is edge to edge (cutout mode "always"): the video also covers the camera hole and the requested
+  size is the whole display.
 
 ## Debug: open a raw appId
 

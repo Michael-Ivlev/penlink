@@ -1,5 +1,6 @@
 package dev.penlink.ui
 
+import android.view.WindowManager
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.LocalActivity
 import androidx.compose.foundation.background
@@ -28,6 +29,7 @@ import androidx.compose.material.icons.filled.ZoomOutMap
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -57,6 +59,9 @@ import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
 import dev.penlink.PenlinkApp
+import dev.penlink.data.Quality
+import dev.penlink.data.StreamPrefs
+import kotlin.math.roundToInt
 import dev.penlink.Screen
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.ime
@@ -104,9 +109,23 @@ fun SessionScreen(app: PenlinkApp, conn: HostConnection, selectedId: Long) {
         val window = activity?.window
         val controller = window?.let { WindowInsetsControllerCompat(it, view) }
         if (window != null) WindowCompat.setDecorFitsSystemWindows(window, false)
+        // Draw under the camera hole too (both orientations): the video fills the whole display.
+        val oldCutout = window?.attributes?.layoutInDisplayCutoutMode
+        window?.let {
+            val a = it.attributes
+            a.layoutInDisplayCutoutMode = WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_ALWAYS
+            it.attributes = a
+        }
         controller?.systemBarsBehavior = WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
         controller?.hide(WindowInsetsCompat.Type.systemBars())
-        onDispose { controller?.show(WindowInsetsCompat.Type.systemBars()) }
+        onDispose {
+            controller?.show(WindowInsetsCompat.Type.systemBars())
+            if (window != null && oldCutout != null) {
+                val a = window.attributes
+                a.layoutInDisplayCutoutMode = oldCutout
+                window.attributes = a
+            }
+        }
     }
 
     // The video area: the window minus the phone keyboard and the extra-keys row. Whenever it changes
@@ -374,49 +393,94 @@ fun SessionScreen(app: PenlinkApp, conn: HostConnection, selectedId: Long) {
     }
 
     if (showSettings) {
-        ScaleSheet(app, current, onDismiss = { showSettings = false })
+        SettingsSheet(app, conn, current, onDismiss = { showSettings = false })
     }
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun ScaleSheet(app: PenlinkApp, session: RemoteSession, onDismiss: () -> Unit) {
+private fun SettingsSheet(app: PenlinkApp, conn: HostConnection, session: RemoteSession, onDismiss: () -> Unit) {
     val scope = rememberCoroutineScope()
-    val activity = LocalActivity.current
-    val initial by session.scale.collectAsState()
-    var value by remember { mutableStateOf(initial.toFloat()) }
+    val prefs by session.prefs.collectAsState()
+    var quality by remember { mutableStateOf(prefs.quality) }
+    var step by remember { mutableStateOf(StreamPrefs.UI_STEPS.indexOf(prefs.uiScale).coerceAtLeast(0).toFloat()) }
+
+    fun apply(q: Quality, stepIndex: Int) {
+        val p = StreamPrefs(q, StreamPrefs.UI_STEPS[stepIndex])
+        session.setPrefs(p)
+        scope.launch { app.store.setStreamPrefs(conn.host.address, p) }
+    }
+
     ModalBottomSheet(onDismissRequest = onDismiss) {
         Column(Modifier.padding(horizontal = 24.dp, vertical = 8.dp).padding(bottom = 24.dp)) {
-            Text("UI scale: ${"%.2f".format(value)}x", style = MaterialTheme.typography.titleMedium)
-            Text(
-                "How much bigger the PC window is drawn than at 100%. Higher = bigger text and buttons.",
-                style = MaterialTheme.typography.bodySmall,
-            )
-            Slider(
-                value = value,
-                onValueChange = { value = it },
-                valueRange = 1f..4f,
-                steps = 11,
-                onValueChangeFinished = {
-                    val (w, h) = activity?.windowPixels() ?: session.requestedSize.value
-                    session.resize(w, h, value.toDouble())
-                    scope.launch { app.store.setDefaultScale(value.toDouble()) }
-                },
-            )
-            Text("Video: ${session.requestedSize.value.first} x ${session.requestedSize.value.second} px")
-            val win by session.windowSize.collectAsState()
-            win?.let { w ->
-                Text("PC window: ${w.width} x ${w.height} px", style = MaterialTheme.typography.bodySmall)
-                if (w.fitted) {
-                    Text(
-                        fittedHint(session.requestedSize.value.first, w.width),
-                        color = MaterialTheme.colorScheme.error,
-                        style = MaterialTheme.typography.bodyMedium,
-                        modifier = Modifier.padding(top = 4.dp),
+            Text("Quality", style = MaterialTheme.typography.titleMedium)
+            Row(Modifier.padding(top = 4.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                for (q in Quality.entries) {
+                    FilterChip(
+                        selected = quality == q,
+                        onClick = {
+                            quality = q
+                            apply(q, step.roundToInt())
+                        },
+                        label = { Text(q.label) },
                     )
                 }
             }
+            Text(
+                if (quality == Quality.Sharp) "Full phone resolution: crisp text."
+                else "Half resolution, upscaled here: bigger UI, lighter stream.",
+                style = MaterialTheme.typography.bodySmall,
+            )
+
+            val uiPercent = StreamPrefs.UI_STEPS[step.roundToInt()]
+            Text("UI size: $uiPercent%", style = MaterialTheme.typography.titleMedium, modifier = Modifier.padding(top = 16.dp))
+            Text(
+                "How big text and buttons are on the PC. Higher = bigger.",
+                style = MaterialTheme.typography.bodySmall,
+            )
+            Slider(
+                value = step,
+                onValueChange = { step = it },
+                valueRange = 0f..(StreamPrefs.UI_STEPS.size - 1).toFloat(),
+                steps = StreamPrefs.UI_STEPS.size - 2,
+                onValueChangeFinished = { apply(quality, step.roundToInt()) },
+            )
+
+            val win by session.windowSize.collectAsState()
+            val size by session.requestedSize.collectAsState()
+            val w = win
+            Text("Showing", style = MaterialTheme.typography.titleMedium, modifier = Modifier.padding(top = 8.dp))
+            when {
+                w == null -> Text("Waiting for the PC...", style = MaterialTheme.typography.bodyMedium)
+                w.isMonitor -> {
+                    Text("Virtual monitor: ${w.width} x ${w.height} px", style = MaterialTheme.typography.bodyMedium)
+                    val asked = StreamPrefs.dpiAsked(StreamPrefs(quality, uiPercent))
+                    val dpi = w.dpi
+                    if (dpi != null) {
+                        Text(
+                            if (dpi == asked) "Windows DPI: $dpi%" else "Windows DPI: $dpi% (asked $asked%, the nearest step Windows allows)",
+                            style = MaterialTheme.typography.bodyMedium,
+                        )
+                    }
+                }
+                else -> {
+                    Text("The app's window: ${w.width} x ${w.height} px", style = MaterialTheme.typography.bodyMedium)
+                    Text(
+                        "No virtual monitor (is the SudoVDA display driver installed on the PC?), so menus and dialogs outside the app window do not show.",
+                        style = MaterialTheme.typography.bodySmall,
+                        modifier = Modifier.padding(top = 2.dp),
+                    )
+                    if (w.fitted) {
+                        Text(
+                            fittedHint(size.first, w.width),
+                            color = MaterialTheme.colorScheme.error,
+                            style = MaterialTheme.typography.bodyMedium,
+                            modifier = Modifier.padding(top = 4.dp),
+                        )
+                    }
+                }
+            }
+            Text("Video: ${size.first} x ${size.second} px requested", style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(top = 4.dp))
         }
     }
 }
-

@@ -6,6 +6,8 @@ import android.content.pm.ApplicationInfo
 import android.os.Bundle
 import android.widget.Toast
 import androidx.lifecycle.lifecycleScope
+import dev.penlink.data.Quality
+import dev.penlink.data.StreamPrefs
 import dev.penlink.protocol.AppEntry
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
@@ -61,9 +63,16 @@ class MainActivity : ComponentActivity() {
                 return@launch
             }
             val conn = app.connect(host)
-            val scale = app.store.defaultScale.first()
+            // Optional overrides for scripted tests: --es quality fast --ei uiScale 250
+            var prefs = app.store.streamPrefs(host.address).first()
+            val q = intent.getStringExtra("quality")
+            val ui = if (intent.hasExtra("uiScale")) intent.getIntExtra("uiScale", prefs.uiScale) else null
+            if (q != null || ui != null) {
+                prefs = StreamPrefs(if (q != null) Quality.fromWire(q) else prefs.quality, ui?.let { StreamPrefs.snap(it) } ?: prefs.uiScale)
+                app.store.setStreamPrefs(host.address, prefs)
+            }
             val (w, h) = windowPixels()
-            val s = conn.open(AppEntry(appId, "debug app"), w, h, scale)
+            val s = conn.open(AppEntry(appId, "debug app"), w, h, prefs)
             app.navigate(Screen.Session(s.localId))
         }
     }

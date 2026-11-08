@@ -1,6 +1,7 @@
 package dev.penlink.rtc
 
 import dev.penlink.data.SavedHost
+import dev.penlink.data.StreamPrefs
 import dev.penlink.protocol.AppEntry
 import dev.penlink.protocol.HostAddress
 import dev.penlink.protocol.WsIn
@@ -79,8 +80,8 @@ class HostConnection(
     private fun sendFrame(text: String): Boolean = ws?.send(text) ?: false
 
     /** Open an app in a new tab. Works while the link is down too: the open is sent once it is up. */
-    fun open(app: AppEntry, width: Int, height: Int, scale: Double): RemoteSession {
-        val s = RemoteSession(ids.getAndIncrement(), app.id, app.name, width, height, scale, rtc, ::sendFrame)
+    fun open(app: AppEntry, width: Int, height: Int, prefs: StreamPrefs): RemoteSession {
+        val s = RemoteSession(ids.getAndIncrement(), app.id, app.name, width, height, prefs, rtc, ::sendFrame)
         synchronized(lock) {
             _sessions.update { it + s }
             lastError.value = null
@@ -99,7 +100,7 @@ class HostConnection(
     fun onScreenSize(width: Int, height: Int) {
         for (s in _sessions.value) {
             if (s.status.value is SessionStatus.Closed) continue
-            if (s.requestedSize.value != width to height) s.resize(width, height, s.scale.value)
+            if (s.requestedSize.value != width to height) s.resize(width, height)
         }
     }
 
@@ -205,7 +206,7 @@ class HostConnection(
                 s?.onOpened(m.sessionId, m.title)
             }
             is WsIn.Title -> find(m.sessionId)?.onTitle(m.title)
-            is WsIn.Window -> find(m.sessionId)?.onWindow(m.width, m.height, m.fitted)
+            is WsIn.Window -> find(m.sessionId)?.onWindow(m.width, m.height, m.fitted, m.mode, m.dpi)
             is WsIn.Offer -> find(m.sessionId)?.onOffer(m.sdp)
             is WsIn.Ice -> find(m.sessionId)?.onRemoteIce(m.candidate, m.sdpMid, m.sdpMLineIndex)
             is WsIn.Closed -> {

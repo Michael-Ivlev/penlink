@@ -34,6 +34,16 @@ Windows PC agent for Penlink: streams one app window to the phone over WebRTC
 - Encoder: openh264, 4 threads, 1200-byte slices, camera real-time usage, low complexity (see `examples/encbench.rs`).
 - `cargo run --release --example testpad -- <log file>`: test window that logs every key/mouse/pen event it gets.
 
+## Virtual monitors (SudoVDA)
+
+- Needs the SudoVDA driver (`root\sudomaker\sudovda`, installed for example by the Apollo installer). Without it
+  the host says "window capture" at start and works as before. `--no-vdisplay` forces that.
+- `cargo run --example vdcheck` shows whether the driver is there, the GPUs and the monitors;
+  `-- --make 1440x3120 --dpi 300 --secs 8` creates one Penlink monitor, removes it and checks that the real
+  monitors are unchanged. Penlink only touches monitors it created (GUID marker `PENLINK!`), never the primary.
+- `%APPDATA%\Penlinkdisplays.json` lists live Penlink monitors; leftovers are removed at start.
+- Details of the behaviour: SPEC.md "Version 2".
+
 ## Crash reports and stress test
 
 - An unhandled exception (for example an access violation) writes `%APPDATA%\Penlink\crash\crash-<time>-<pid>.txt`

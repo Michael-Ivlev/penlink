@@ -29,8 +29,28 @@ Windows first, Mac later. Used mainly for coding, plus general apps.
   and touch (PT_TOUCH). The target window is brought to the foreground first.
 
 ## Version 2
-Virtual monitor per app (IddCx virtual display driver), so popups show and the
-PC's own screen is untouched. Hardware encode. Mac host.
+Hardware encode and the Mac host come later. The virtual monitor per app is built:
+
+- **Driver:** SudoVDA (IddCx), installed separately (for example by the Apollo installer). The host opens
+  device interface `{e5bcc234-1e0c-418a-a0d4-ef8b7501414d}`, checks the protocol version, pings the driver
+  watchdog three times per timeout (host dies: its monitors vanish after about 3 s) and pins the render
+  adapter to the first hardware GPU (`PENLINK_RENDER_ADAPTER` overrides by name).
+- **When:** the driver is usable and the `open` carries `quality` or `uiScale` (and the host was not started with
+  `--no-vdisplay`). Otherwise, or if any step fails, version 1 window capture is used and `window.mode` says `window`.
+- **One monitor per session:** created at the phone's size (sharp) or half of it (fast), DPI set to the UI size
+  (fast: half), placed right of all monitors (never primary, only that device is changed). The app window is moved
+  onto it and maximised; the host captures the MONITOR, so menus, popups and dialogs show. Input maps to the monitor
+  rectangle. Input is accepted while the foreground window belongs to the app (its process or owned by its window)
+  and is on that monitor.
+- **Keyboard:** the monitor stays. The window is restored and sized to the top rows and only those rows are
+  streamed (the video is exactly the area above the keyboard, so the phone needs no cropping).
+  Hiding the keyboard maximises the window again.
+- **Rotation / quality change:** the monitor is switched to the new mode (if Windows accepts it, tested first) or
+  removed and re-added under the same GUID; position, DPI and maximise are applied again.
+- **Lifetime:** closing a tab removes the monitor at once; the window goes back to the primary monitor (the host
+  moves it itself). A dropped WebSocket keeps the monitor 2 minutes; `open` with `attach` takes it over. Host exit
+  (Ctrl+C, console close) removes all. Monitor GUIDs (marker `PENLINK!`, serial `PENLINK*****`) are listed in
+  `%APPDATA%\Penlinkdisplays.json` and removed at the next start if the host crashed.
 
 ## Protocol (both sides must match this exactly)
 
@@ -75,7 +95,11 @@ Phone → host:
   request, and still encodes the video at the requested pixel size (the picture is upscaled).
 - `{"type":"answer","sessionId":"...","sdp":"..."}`
 - `{"type":"ice","sessionId":"...","candidate":"...","sdpMid":"0","sdpMLineIndex":0}`
-- `{"type":"resize","sessionId":"...","width":3120,"height":1440,"scale":2.0}`
+- `{"type":"resize","sessionId":"...","width":3120,"height":1440,"scale":2.0,"quality":"sharp","uiScale":300}`
+  `quality` `"sharp"` (monitor = phone pixels) or `"fast"` (half, video upscaled on the phone) and `uiScale`
+  (percent, 100-500; Windows DPI steps 100,125,150,175,200,225,250,300,350,400,450,500) are optional on `open`
+  and `resize`. Without `uiScale`, `scale*100` is used; without `quality`, sharp. Sending either asks for a
+  virtual monitor. Window capture honours them too (video halves in fast, window size stays).
 - `{"type":"close","sessionId":"..."}`
 - `{"type":"keyframe","sessionId":"..."}` ask for a new keyframe
 
@@ -85,7 +109,10 @@ Host → phone:
   sessionId; `title` may be empty. The phone shows a pending tab (spinner).
 - `{"type":"title","sessionId":"...","title":"..."}` optional; the window title,
   once the window has been found (sent before `offer`).
-- `{"type":"window","sessionId":"...","width":812,"height":1760,"fitted":true}` the real size of the
+- `{"type":"window","sessionId":"...","width":812,"height":1760,"fitted":true,"mode":"window"}` (monitor mode:
+  `"mode":"monitor","dpi":300`, width/height = the streamed monitor area, `fitted` false, `dpi` = the step
+  Windows really applied: the nearest allowed one if it refused the asked one). `mode` is missing from old hosts
+  (= window). The real size of the
   PC window's client area in PC pixels, sent before `offer` and after every `resize`. `fitted` is true
   when the request was shrunk to fit the PC screen (so the video is upscaled and looks soft); the phone
   shows a hint in its settings sheet ("PC screen too small ... raise the UI scale": a higher scale

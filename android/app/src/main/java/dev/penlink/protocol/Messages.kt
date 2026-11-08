@@ -27,14 +27,23 @@ data class InfoResponse(val hostName: String, val version: String)
 
 /** Phone -> host WebSocket messages (SPEC "Protocol"). Each returns the JSON text frame. */
 object WsOut {
-    /** [attach]: re-open after a lost connection; the host attaches to the running app instead of launching it. */
-    fun open(appId: String, width: Int, height: Int, scale: Double, attach: Boolean = false): String = obj {
+    /**
+     * [attach]: re-open after a lost connection; the host attaches to the running app instead of launching it.
+     * [quality] ("sharp" | "fast") and [uiScale] (percent) ask for a virtual monitor of the phone's size
+     * (or half of it) with that UI size; a host without the driver answers with window capture.
+     */
+    fun open(
+        appId: String, width: Int, height: Int, scale: Double, attach: Boolean = false,
+        quality: String? = null, uiScale: Int? = null,
+    ): String = obj {
         put("type", "open")
         put("appId", appId)
         put("width", width)
         put("height", height)
         put("scale", scale)
         if (attach) put("attach", true)
+        if (quality != null) put("quality", quality)
+        if (uiScale != null) put("uiScale", uiScale)
     }
 
     fun answer(sessionId: String, sdp: String): String = obj {
@@ -51,12 +60,17 @@ object WsOut {
         put("sdpMLineIndex", sdpMLineIndex)
     }
 
-    fun resize(sessionId: String, width: Int, height: Int, scale: Double): String = obj {
+    fun resize(
+        sessionId: String, width: Int, height: Int, scale: Double,
+        quality: String? = null, uiScale: Int? = null,
+    ): String = obj {
         put("type", "resize")
         put("sessionId", sessionId)
         put("width", width)
         put("height", height)
         put("scale", scale)
+        if (quality != null) put("quality", quality)
+        if (uiScale != null) put("uiScale", uiScale)
     }
 
     fun close(sessionId: String): String = obj {
@@ -75,8 +89,14 @@ sealed interface WsIn {
     data class Opened(val sessionId: String, val appId: String, val title: String) : WsIn
     /** Window title became known or changed (sent after `opened`). */
     data class Title(val sessionId: String, val title: String) : WsIn
-    /** Real PC window size; [fitted] = shrunk to fit the PC screen (video is upscaled). */
-    data class Window(val sessionId: String, val width: Int, val height: Int, val fitted: Boolean) : WsIn
+    /**
+     * What the video shows: [mode] "window" (the app's window; real size, [fitted] = shrunk to fit the PC screen,
+     * video upscaled) or "monitor" (a virtual monitor of that size, [dpi] = the Windows DPI percent applied).
+     */
+    data class Window(
+        val sessionId: String, val width: Int, val height: Int, val fitted: Boolean,
+        val mode: String = "window", val dpi: Int? = null,
+    ) : WsIn
     data class Offer(val sessionId: String, val sdp: String) : WsIn
     data class Ice(val sessionId: String, val candidate: String, val sdpMid: String?, val sdpMLineIndex: Int) : WsIn
     data class Closed(val sessionId: String, val reason: String) : WsIn
@@ -99,6 +119,8 @@ object WsParser {
                 (o["width"] as? JsonPrimitive)?.intOrNull ?: return null,
                 (o["height"] as? JsonPrimitive)?.intOrNull ?: return null,
                 (o["fitted"] as? JsonPrimitive)?.booleanOrNull ?: false,
+                s("mode") ?: "window",
+                (o["dpi"] as? JsonPrimitive)?.intOrNull,
             )
             "offer" -> WsIn.Offer(s("sessionId") ?: return null, s("sdp") ?: return null)
             "ice" -> WsIn.Ice(

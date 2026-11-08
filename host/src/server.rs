@@ -16,7 +16,7 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use futures_util::{SinkExt, StreamExt};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -341,7 +341,15 @@ async fn ws_handler(
     ws.on_upgrade(move |sock| ws_loop(sock, st))
 }
 
-type Sessions = Arc<Mutex<HashMap<String, Arc<Session>>>>;
+/// Sessions of one WebSocket: `pending` ones were accepted (`opened` sent) but are still
+/// launching their app; `ready` ones have a peer connection.
+#[derive(Default)]
+struct ConnSessions {
+    ready: Mutex<HashMap<String, Arc<Session>>>,
+    pending: Mutex<HashSet<String>>,
+}
+
+type Sessions = Arc<ConnSessions>;
 
 async fn ws_loop(socket: WebSocket, st: Arc<AppState>) {
     let (mut sink, mut stream) = socket.split();
@@ -355,7 +363,7 @@ async fn ws_loop(socket: WebSocket, st: Arc<AppState>) {
         }
         let _ = sink.close().await;
     });
-    let sessions: Sessions = Arc::new(Mutex::new(HashMap::new()));
+    let sessions: Sessions = Arc::new(ConnSessions::default());
 
     while let Some(Ok(msg)) = stream.next().await {
         let text = match msg {
@@ -411,9 +419,12 @@ async fn ws_loop(socket: WebSocket, st: Arc<AppState>) {
                 }
             }
             ClientMsg::Close { session_id } => {
-                let s = sessions.lock().await.remove(&session_id);
+                let s = sessions.ready.lock().await.remove(&session_id);
                 if let Some(s) = s {
                     s.close().await;
+                    let _ = out_tx.send(ServerMsg::Closed { session_id, reason: "closed".into() });
+                } else if sessions.pending.lock().await.remove(&session_id) {
+                    // Still launching: do_open notices the missing entry and cleans up.
                     let _ = out_tx.send(ServerMsg::Closed { session_id, reason: "closed".into() });
                 } else {
                     unknown_session(&out_tx, &session_id);
@@ -423,7 +434,8 @@ async fn ws_loop(socket: WebSocket, st: Arc<AppState>) {
     }
 
     // Phone went away: stop every session (apps stay open).
-    let all: Vec<Arc<Session>> = sessions.lock().await.drain().map(|(_, s)| s).collect();
+    sessions.pending.lock().await.clear();
+    let all: Vec<Arc<Session>> = sessions.ready.lock().await.drain().map(|(_, s)| s).collect();
     for s in all {
         s.close().await;
     }
@@ -436,7 +448,7 @@ fn unknown_session(out: &UnboundedSender<ServerMsg>, id: &str) {
 }
 
 async fn get_session(sessions: &Sessions, id: &str) -> Option<Arc<Session>> {
-    sessions.lock().await.get(id).cloned()
+    sessions.ready.lock().await.get(id).cloned()
 }
 
 async fn resolve_target(st: &AppState, app_id: &str) -> Option<Target> {
@@ -455,43 +467,68 @@ async fn do_open(
     height: u32,
     scale: f64,
 ) {
+    // Accept first: the phone gets a session id (and a pending tab) before anything slow
+    // happens, so every later `closed` refers to a session it knows.
     let session_id = new_session_id();
+    let _ = out.send(ServerMsg::Opened { session_id: session_id.clone(), app_id: app_id.clone(), title: String::new() });
+    sessions.pending.lock().await.insert(session_id.clone());
+    let fail = |reason: String| {
+        let _ = out.send(ServerMsg::Closed { session_id: session_id.clone(), reason });
+    };
     if !(64..=8192).contains(&width) || !(64..=8192).contains(&height) {
-        let _ = out.send(ServerMsg::Error { message: format!("bad size {width}x{height}") });
+        sessions.pending.lock().await.remove(&session_id);
+        fail(format!("error: bad size {width}x{height}"));
         return;
     }
     let Some(target) = resolve_target(&st, &app_id).await else {
-        let _ = out.send(ServerMsg::Error { message: format!("unknown app {app_id}") });
+        sessions.pending.lock().await.remove(&session_id);
+        fail(format!("error: unknown app {app_id}"));
         return;
     };
-    tracing::info!("open {:?} ({app_id}) {width}x{height} @{scale}", target.name);
+    tracing::info!("open {:?} ({app_id}) {width}x{height} @{scale} -> session {session_id}", target.name);
 
     let found = tokio::task::spawn_blocking(move || launcher::launch_and_find(&target, LAUNCH_TIMEOUT)).await;
     let found = match found {
         Ok(Ok(f)) => f,
         Ok(Err(e)) => {
             tracing::warn!("open failed: {e}");
-            let _ = out.send(ServerMsg::Closed { session_id, reason: format!("error: {e}") });
+            if sessions.pending.lock().await.remove(&session_id) {
+                fail(format!("error: {e}"));
+            }
             return;
         }
         Err(e) => {
-            let _ = out.send(ServerMsg::Closed { session_id, reason: format!("error: {e}") });
+            if sessions.pending.lock().await.remove(&session_id) {
+                fail(format!("error: {e}"));
+            }
             return;
         }
     };
+    if !sessions.pending.lock().await.contains(&session_id) {
+        tracing::info!("session {session_id} was closed while launching");
+        return; // phone closed the tab (or went away); the app stays open
+    }
+    if !found.title.is_empty() {
+        let _ = out.send(ServerMsg::Title { session_id: session_id.clone(), title: found.title.clone() });
+    }
 
     let opened = match Session::open(session_id.clone(), app_id.clone(), found.hwnd, found.title.clone(), width, height, scale).await {
         Ok(o) => o,
         Err(e) => {
             tracing::warn!("session setup failed: {e:#}");
-            let _ = out.send(ServerMsg::Closed { session_id, reason: format!("error: {e}") });
+            if sessions.pending.lock().await.remove(&session_id) {
+                fail(format!("error: {e}"));
+            }
             return;
         }
     };
     let session = opened.session.clone();
-    sessions.lock().await.insert(session_id.clone(), session.clone());
+    if !sessions.pending.lock().await.remove(&session_id) {
+        session.close().await; // closed during setup
+        return;
+    }
+    sessions.ready.lock().await.insert(session_id.clone(), session.clone());
 
-    let _ = out.send(ServerMsg::Opened { session_id: session_id.clone(), app_id, title: found.title });
     let _ = out.send(ServerMsg::Offer { session_id: session_id.clone(), sdp: session.offer_sdp.clone() });
 
     // Local ICE candidates (trickle) - only after the offer went out.
@@ -523,7 +560,7 @@ async fn do_open(
                 PipelineEvent::WindowClosed => "app exited".to_string(),
                 PipelineEvent::Error(e) => format!("error: {e}"),
             };
-            let removed = sessions.lock().await.remove(&session_id);
+            let removed = sessions.ready.lock().await.remove(&session_id);
             if removed.is_some() {
                 session.close().await;
                 let _ = out.send(ServerMsg::Closed { session_id, reason });

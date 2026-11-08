@@ -1,6 +1,6 @@
 //! Launch an app and find its main top-level window.
 
-use crate::apps::{shell_launch, AppInfo};
+use crate::apps::{activate_packaged, shell_launch, AppInfo};
 use crate::winutil::{list_candidate_windows, process_exe_name, run_sta, Hwnd, WinInfo};
 use anyhow::{anyhow, Result};
 use std::collections::{HashMap, HashSet};
@@ -10,6 +10,10 @@ use std::time::{Duration, Instant};
 pub struct Target {
     /// Path of the .lnk or exe handed to ShellExecute.
     pub file: String,
+    /// Command-line arguments for `file` (only `exe:` ids carry any).
+    pub args: String,
+    /// Packaged app: launched through the activation manager instead of `file`.
+    pub aumid: Option<String>,
     pub name: String,
     /// Lowercase exe file name expected for the app's process(es).
     pub exe_name: Option<String>,
@@ -17,12 +21,35 @@ pub struct Target {
 
 impl Target {
     pub fn from_app(a: &AppInfo) -> Self {
-        Self { file: a.lnk.to_string_lossy().to_string(), name: a.name.clone(), exe_name: a.exe_name.clone() }
+        Self {
+            file: a.lnk.to_string_lossy().to_string(),
+            args: String::new(),
+            aumid: a.aumid.clone(),
+            name: a.name.clone(),
+            exe_name: a.exe_name.clone(),
+        }
     }
 
-    /// `exe:<path or file name>` ids, for tests and tools.
+    /// Split the text after `exe:` into program and arguments. A quoted program may contain
+    /// spaces; otherwise the program ends at the first `.exe` followed by a space.
+    pub fn split_exe_command(cmd: &str) -> (String, String) {
+        let cmd = cmd.trim();
+        if let Some(rest) = cmd.strip_prefix('"') {
+            if let Some(end) = rest.find('"') {
+                return (rest[..end].to_string(), rest[end + 1..].trim().to_string());
+            }
+        }
+        let lower = cmd.to_ascii_lowercase();
+        if let Some(i) = lower.find(".exe ") {
+            return (cmd[..i + 4].to_string(), cmd[i + 5..].trim().to_string());
+        }
+        (cmd.to_string(), String::new())
+    }
+
+    /// `exe:<path or file name> [arguments]` ids, for tests and tools.
     pub fn from_exe_id(id: &str) -> Option<Self> {
-        let path = id.strip_prefix("exe:")?.trim();
+        let (path, args) = Self::split_exe_command(id.strip_prefix("exe:")?);
+        let path = path.as_str();
         if path.is_empty() {
             return None;
         }
@@ -33,7 +60,7 @@ impl Target {
         } else {
             format!("{}.exe", file_name.to_ascii_lowercase())
         };
-        Some(Self { file: path.to_string(), name: stem, exe_name: Some(exe_name) })
+        Some(Self { file: path.to_string(), args, aumid: None, name: stem, exe_name: Some(exe_name) })
     }
 }
 
@@ -105,7 +132,10 @@ fn launch_and_find_inner(t: &Target, timeout: Duration) -> Result<Found> {
     let mut exes = ExeCache(HashMap::new());
     let before: HashSet<Hwnd> = list_candidate_windows().iter().map(|w| w.hwnd).collect();
     let started = Instant::now();
-    let launched = shell_launch(&t.file)?;
+    let launched = match &t.aumid {
+        Some(a) => activate_packaged(a)?,
+        None => shell_launch(&t.file, &t.args)?,
+    };
     tracing::info!("launched {:?} (pid {:?}), waiting for its window", t.file, launched.pid);
 
     let mut first_new: Option<Instant> = None;
@@ -157,6 +187,19 @@ mod tests {
         assert_eq!(t.exe_name.as_deref(), Some("calc.exe"));
         assert!(Target::from_exe_id("exe:").is_none());
         assert!(Target::from_exe_id("abc").is_none());
+    }
+
+    #[test]
+    fn exe_ids_with_arguments() {
+        let t = Target::from_exe_id(r"exe:C:\tools\testpad.exe C:\logs\a b.log").unwrap();
+        assert_eq!(t.file, r"C:\tools\testpad.exe");
+        assert_eq!(t.args, r"C:\logs\a b.log");
+        assert_eq!(t.exe_name.as_deref(), Some("testpad.exe"));
+        let t = Target::from_exe_id(r#"exe:"C:\Program Files\x\y.exe" --flag"#).unwrap();
+        assert_eq!(t.file, r"C:\Program Files\x\y.exe");
+        assert_eq!(t.args, "--flag");
+        assert_eq!(t.exe_name.as_deref(), Some("y.exe"));
+        assert_eq!(Target::from_exe_id("exe:notepad.exe").unwrap().args, "");
     }
 
     #[test]

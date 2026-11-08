@@ -11,12 +11,16 @@ use windows::Win32::Graphics::Gdi::{
     DeleteObject, GetDC, GetDIBits, ReleaseDC, BITMAPINFO, BITMAPINFOHEADER, BI_RGB, DIB_RGB_COLORS, HGDIOBJ,
 };
 use windows::Win32::Storage::FileSystem::WIN32_FIND_DATAW;
-use windows::Win32::System::Com::{CoCreateInstance, IPersistFile, CLSCTX_INPROC_SERVER, STGM_READ};
+use windows::Win32::System::Com::{
+    CoCreateInstance, CoTaskMemFree, IPersistFile, CLSCTX_INPROC_SERVER, CLSCTX_LOCAL_SERVER, STGM_READ,
+};
 use windows::Win32::System::Threading::GetProcessId;
 use windows::Win32::UI::Shell::{
-    IShellItemImageFactory, IShellLinkW, SHCreateItemFromParsingName, SHGetKnownFolderPath, ShellExecuteExW,
-    FOLDERID_CommonPrograms, FOLDERID_Programs, KF_FLAG_DEFAULT, SEE_MASK_FLAG_NO_UI, SEE_MASK_NOASYNC,
-    SEE_MASK_NOCLOSEPROCESS, SHELLEXECUTEINFOW, SIIGBF_ICONONLY, ShellLink,
+    ApplicationActivationManager, IApplicationActivationManager, IEnumShellItems, IShellItem, IShellItemImageFactory,
+    IShellLinkW, SHCreateItemFromParsingName, SHGetKnownFolderItem, SHGetKnownFolderPath, ShellExecuteExW,
+    BHID_EnumItems, FOLDERID_AppsFolder, FOLDERID_CommonPrograms, FOLDERID_Programs, KF_FLAG_DEFAULT,
+    SEE_MASK_FLAG_NO_UI, SEE_MASK_NOASYNC, SEE_MASK_NOCLOSEPROCESS, SHELLEXECUTEINFOW, SIGDN_NORMALDISPLAY,
+    SIGDN_PARENTRELATIVEPARSING, SIIGBF_ICONONLY, ShellLink, AO_NONE,
 };
 use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
 
@@ -31,6 +35,9 @@ pub struct AppInfo {
     pub target: String,
     /// Lowercase exe file name of the target, if any.
     pub exe_name: Option<String>,
+    /// Application User Model ID for apps listed in `shell:AppsFolder` (packaged / Store apps).
+    /// These have no `.lnk`; `lnk` is empty.
+    pub aumid: Option<String>,
 }
 
 impl AppInfo {
@@ -99,7 +106,12 @@ pub fn should_skip(name: &str, target: &str) -> bool {
 /// Sort by name (case-insensitive) and drop duplicates (same display name, or same lnk id).
 pub fn sort_dedupe(mut apps: Vec<AppInfo>) -> Vec<AppInfo> {
     apps.sort_by(|a, b| {
-        a.name.to_lowercase().cmp(&b.name.to_lowercase()).then_with(|| a.id.cmp(&b.id))
+        a.name
+            .to_lowercase()
+            .cmp(&b.name.to_lowercase())
+            // a Start Menu shortcut wins over an AppsFolder entry of the same name
+            .then_with(|| a.aumid.is_some().cmp(&b.aumid.is_some()))
+            .then_with(|| a.id.cmp(&b.id))
     });
     let mut seen_names = HashSet::new();
     let mut seen_ids = HashSet::new();
@@ -203,10 +215,73 @@ pub fn scan_apps() -> Vec<AppInfo> {
                 lnk: f,
                 target,
                 exe_name,
+                aumid: None,
             });
+        }
+        match scan_apps_folder() {
+            Ok(v) => apps.extend(v),
+            Err(e) => tracing::warn!("shell:AppsFolder enumeration failed: {e}"),
         }
         sort_dedupe(apps)
     })
+}
+
+/// Stable id of an AppsFolder entry.
+pub fn packaged_id(aumid: &str) -> String {
+    stable_id(&format!("appsfolder:{aumid}"))
+}
+
+/// `true` for AppsFolder parsing names we can launch by AUMID. Desktop entries show up there
+/// too, as filesystem paths or `{KNOWNFOLDER-GUID}\...` (the Start Menu shortcuts cover those).
+pub fn is_aumid(parsing_name: &str) -> bool {
+    !parsing_name.is_empty()
+        && !parsing_name.starts_with('{')
+        && !parsing_name.contains('\\')
+        && !parsing_name.contains('/')
+        && !parsing_name.contains(':')
+}
+
+unsafe fn display_name(item: &IShellItem, kind: windows::Win32::UI::Shell::SIGDN) -> Option<String> {
+    let p = unsafe { item.GetDisplayName(kind) }.ok()?;
+    let s = unsafe { p.to_string() }.ok();
+    unsafe { CoTaskMemFree(Some(p.0 as *const _)) };
+    s
+}
+
+/// Packaged / Store apps (Terminal, Calculator, new Notepad, ...) from `shell:AppsFolder`.
+/// Must run on a COM-initialised (STA) thread. Never launches anything.
+pub fn scan_apps_folder() -> Result<Vec<AppInfo>> {
+    let mut out = Vec::new();
+    unsafe {
+        let folder: IShellItem = SHGetKnownFolderItem(&FOLDERID_AppsFolder, KF_FLAG_DEFAULT, Some(HANDLE::default()))?;
+        let en: IEnumShellItems = folder.BindToHandler(None, &BHID_EnumItems)?;
+        loop {
+            let mut items: [Option<IShellItem>; 1] = [None];
+            let mut fetched = 0u32;
+            let _ = en.Next(&mut items, Some(&mut fetched));
+            if fetched == 0 {
+                break;
+            }
+            let Some(item) = items[0].take() else { break };
+            let (Some(name), Some(aumid)) =
+                (display_name(&item, SIGDN_NORMALDISPLAY), display_name(&item, SIGDN_PARENTRELATIVEPARSING))
+            else {
+                continue;
+            };
+            if name.trim().is_empty() || !is_aumid(&aumid) || should_skip(&name, "") || name.trim().eq_ignore_ascii_case("remove") {
+                continue;
+            }
+            out.push(AppInfo {
+                id: packaged_id(&aumid),
+                name: name.trim().to_string(),
+                lnk: PathBuf::new(),
+                target: String::new(),
+                exe_name: None,
+                aumid: Some(aumid),
+            });
+        }
+    }
+    Ok(out)
 }
 
 // ---------------------------------------------------------------------------------------
@@ -305,6 +380,9 @@ fn icon_for_path(path: &Path) -> Result<Vec<u8>> {
 pub fn app_icon_png(app: &AppInfo) -> Result<Vec<u8>> {
     let app = app.clone();
     run_sta(move || {
+        if let Some(aumid) = &app.aumid {
+            return icon_for_path(Path::new(&format!("shell:AppsFolder\\{aumid}")));
+        }
         if !app.target.is_empty() && Path::new(&app.target).exists() {
             if let Ok(p) = icon_for_path(Path::new(&app.target)) {
                 return Ok(p);
@@ -321,14 +399,31 @@ pub struct Launched {
     pub pid: Option<u32>,
 }
 
+/// Launch a packaged app by AUMID; gives the PID of the app process. Call on a COM thread.
+pub fn activate_packaged(aumid: &str) -> Result<Launched> {
+    unsafe {
+        let mgr: IApplicationActivationManager = CoCreateInstance(&ApplicationActivationManager, None, CLSCTX_LOCAL_SERVER)?;
+        let w = wide(aumid);
+        match mgr.ActivateApplication(PCWSTR(w.as_ptr()), PCWSTR::null(), AO_NONE) {
+            Ok(pid) => Ok(Launched { pid: if pid == 0 { None } else { Some(pid) } }),
+            Err(e) => {
+                tracing::debug!("ActivateApplication({aumid}) failed: {e}; trying shell:AppsFolder");
+                shell_launch(&format!("shell:AppsFolder\\{aumid}"), "")
+            }
+        }
+    }
+}
+
 /// Launch a shortcut or executable via ShellExecuteExW. Call on a COM-initialised thread.
-pub fn shell_launch(file: &str) -> Result<Launched> {
+pub fn shell_launch(file: &str, args: &str) -> Result<Launched> {
     unsafe {
         let wfile = wide(file);
+        let wargs = wide(args);
         let mut sei = SHELLEXECUTEINFOW {
             cbSize: std::mem::size_of::<SHELLEXECUTEINFOW>() as u32,
             fMask: SEE_MASK_NOCLOSEPROCESS | SEE_MASK_NOASYNC | SEE_MASK_FLAG_NO_UI,
             lpFile: PCWSTR(wfile.as_ptr()),
+            lpParameters: if args.is_empty() { PCWSTR::null() } else { PCWSTR(wargs.as_ptr()) },
             nShow: SW_SHOWNORMAL.0,
             ..Default::default()
         };
@@ -356,7 +451,57 @@ mod tests {
             lnk: PathBuf::from(format!("{name}.lnk")),
             target: String::new(),
             exe_name: None,
+            aumid: None,
         }
+    }
+
+    #[test]
+    fn lnk_wins_over_appsfolder_entry_of_same_name() {
+        let mut packaged = app("Notepad", "p");
+        packaged.aumid = Some("Microsoft.WindowsNotepad_8wekyb3d8bbwe!App".into());
+        let out = sort_dedupe(vec![packaged, app("notepad", "z-lnk")]);
+        assert_eq!(out.len(), 1);
+        assert!(out[0].aumid.is_none(), "the .lnk entry must be kept");
+        let mut calc = app("Calculator", "c");
+        calc.aumid = Some("Microsoft.WindowsCalculator_8wekyb3d8bbwe!App".into());
+        assert_eq!(sort_dedupe(vec![calc, app("Terminal", "t")]).len(), 2);
+    }
+
+    #[test]
+    fn aumid_detection() {
+        assert!(is_aumid("Microsoft.WindowsCalculator_8wekyb3d8bbwe!App"));
+        assert!(is_aumid("Microsoft.Windows.Explorer"));
+        assert!(!is_aumid(r"C:\Windows\notepad.exe"));
+        assert!(!is_aumid(r"{1AC14E77-02E7-4E5D-B744-2EB1AE5198B7}\notepad.exe"));
+        assert!(!is_aumid(""));
+        assert_ne!(packaged_id("a"), stable_id("a"));
+    }
+
+    /// Lists shell:AppsFolder on this machine (never launches anything).
+    #[test]
+    fn apps_folder_lists_packaged_apps() {
+        let v = crate::winutil::run_sta(|| scan_apps_folder().unwrap());
+        println!("AppsFolder: {} entries", v.len());
+        for a in &v {
+            println!("  {:<40} {}", a.name, a.aumid.as_deref().unwrap_or(""));
+        }
+        assert!(!v.is_empty(), "no packaged apps found");
+        assert!(v.iter().all(|a| a.aumid.is_some() && a.lnk.as_os_str().is_empty()));
+        let has = |n: &str| v.iter().any(|a| a.name.to_lowercase().contains(n));
+        assert!(has("calculator") || has("terminal") || has("notepad"), "no Calculator/Terminal/Notepad found");
+    }
+
+    #[test]
+    fn merged_scan_has_packaged_and_lnk_entries() {
+        let v = scan_apps();
+        println!("merged: {} apps", v.len());
+        assert!(v.iter().any(|a| a.aumid.is_some()), "packaged apps missing from merged list");
+        assert!(v.iter().any(|a| a.aumid.is_none()), "Start Menu shortcuts missing from merged list");
+        let mut names: Vec<_> = v.iter().map(|a| a.name.to_lowercase()).collect();
+        let n = names.len();
+        names.sort();
+        names.dedup();
+        assert_eq!(n, names.len(), "duplicate names in merged list");
     }
 
     #[test]

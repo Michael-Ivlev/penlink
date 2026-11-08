@@ -56,6 +56,9 @@ pub enum ServerMsg {
         app_id: String,
         title: String,
     },
+    /// Window title became known / changed (optional, after `opened`).
+    #[serde(rename_all = "camelCase")]
+    Title { session_id: String, title: String },
     #[serde(rename_all = "camelCase")]
     Offer { session_id: String, sdp: String },
     #[serde(rename_all = "camelCase")]
@@ -283,6 +286,8 @@ mod tests {
         .unwrap();
         assert_eq!(v, json!({"type":"ice","sessionId":"s","candidate":"c","sdpMid":"0","sdpMLineIndex":1}));
 
+        let v = serde_json::to_value(ServerMsg::Title { session_id: "s".into(), title: "T".into() }).unwrap();
+        assert_eq!(v, json!({"type":"title","sessionId":"s","title":"T"}));
         let v = serde_json::to_value(ServerMsg::Closed { session_id: "s".into(), reason: "app exited".into() }).unwrap();
         assert_eq!(v, json!({"type":"closed","sessionId":"s","reason":"app exited"}));
 

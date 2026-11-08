@@ -1,6 +1,6 @@
 //! Smoke tests against a real in-process server.
 //!
-//! `http_and_pairing` runs by default. `open_notepad` launches Notepad on this PC, so it is
+//! `http_and_pairing` runs by default. `open_notepad` launches the testpad example window on this PC, so it is
 //! `#[ignore]`d: run it with `cargo test --test smoke -- --ignored --nocapture`.
 
 use futures_util::{SinkExt, StreamExt};
@@ -146,21 +146,33 @@ async fn http_and_pairing() {
     let (mut ws, _) = tokio_tungstenite::connect_async(format!("ws://{addr}/ws?token={token}")).await.unwrap();
     ws.send(Message::Text(r#"{"type":"keyframe","sessionId":"nope"}"#.into())).await.unwrap();
     ws.send(Message::Text(r#"{"type":"open","appId":"unknown-app","width":720,"height":1280,"scale":1.0}"#.into())).await.unwrap();
-    let mut got_error = false;
-    for _ in 0..4 {
-        let Ok(Some(Ok(Message::Text(t)))) = tokio::time::timeout(Duration::from_secs(5), ws.next()).await else { break };
-        let v: Value = serde_json::from_str(&t).unwrap();
-        if v["type"] == "error" && v["message"].as_str().unwrap().contains("unknown app") {
-            got_error = true;
-            break;
-        }
-    }
-    assert!(got_error, "unknown app -> error message");
+    // `opened` always comes first (so the phone knows the session), then `closed` with that id.
+    let opened = next_json(&mut ws, 5).await;
+    assert_eq!(opened["type"], "opened", "{opened}");
+    let sid = opened["sessionId"].as_str().unwrap().to_string();
+    let closed = next_json(&mut ws, 5).await;
+    assert_eq!(closed["type"], "closed", "{closed}");
+    assert_eq!(closed["sessionId"], sid.as_str(), "closed must carry the session id the phone was given");
+    assert!(closed["reason"].as_str().unwrap().contains("unknown app"), "{closed}");
+
+    // A launch that fails (program does not exist) behaves the same way.
+    ws.send(Message::Text(
+        json!({"type":"open","appId":"exe:C:\\penlink-no-such-dir\\nope.exe","width":720,"height":1280,"scale":1.0}).to_string().into(),
+    ))
+    .await
+    .unwrap();
+    let opened = next_json(&mut ws, 5).await;
+    assert_eq!(opened["type"], "opened", "{opened}");
+    let sid = opened["sessionId"].as_str().unwrap().to_string();
+    let closed = next_json(&mut ws, 20).await;
+    assert_eq!(closed["type"], "closed", "{closed}");
+    assert_eq!(closed["sessionId"], sid.as_str());
+    assert!(closed["reason"].as_str().unwrap().starts_with("error:"), "{closed}");
     srv.shutdown().await;
 }
 
 fn notepad_pids() -> Vec<u32> {
-    let out = Command::new("tasklist").args(["/FI", "IMAGENAME eq Notepad.exe", "/FO", "CSV", "/NH"]).output().unwrap();
+    let out = Command::new("tasklist").args(["/FI", "IMAGENAME eq testpad.exe", "/FO", "CSV", "/NH"]).output().unwrap();
     String::from_utf8_lossy(&out.stdout)
         .lines()
         .filter_map(|l| l.split("\",\"").nth(1).and_then(|p| p.trim_matches('"').parse().ok()))
@@ -177,18 +189,15 @@ async fn next_json(ws: &mut (impl StreamExt<Item = Result<Message, tokio_tungste
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[ignore = "launches Notepad on this PC"]
+#[ignore = "launches the testpad example window on this PC"]
 async fn open_notepad() {
     let srv = start_server().await;
     let token = pair(&srv).await;
-    let (st, body) = http(srv.addr, "GET", "/apps", Some(&token), None).await;
-    assert_eq!(st, 200);
-    let apps: Vec<Value> = serde_json::from_slice(&body).unwrap();
-    let app_id = apps
-        .iter()
-        .find(|a| a["name"].as_str().unwrap().to_lowercase().contains("notepad"))
-        .map(|a| a["id"].as_str().unwrap().to_string())
-        .unwrap_or_else(|| "exe:notepad.exe".to_string());
+    // Never a normal user app: the host would reuse (and type into) an already-running one.
+    // Needs `cargo build --example testpad` first.
+    let exe = concat!(env!("CARGO_MANIFEST_DIR"), "/target/debug/examples/testpad.exe").replace('/', "\\");
+    assert!(std::path::Path::new(&exe).exists(), "run `cargo build --example testpad` first");
+    let app_id = format!("exe:{exe} {}", std::env::temp_dir().join("penlink-smoke-testpad.log").display());
     println!("opening app id {app_id}");
 
     let before = notepad_pids();
@@ -236,7 +245,7 @@ async fn open_notepad() {
     assert_eq!(closed["reason"], "closed");
     srv.shutdown().await;
 
-    // Only terminate Notepad processes this test started.
+    // Only terminate testpad processes this test started.
     tokio::time::sleep(Duration::from_millis(500)).await;
     for pid in notepad_pids().into_iter().filter(|p| !before.contains(p)) {
         let _ = Command::new("taskkill").args(["/PID", &pid.to_string(), "/F"]).output();

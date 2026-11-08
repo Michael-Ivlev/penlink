@@ -160,6 +160,10 @@ impl Session {
                 inj.release_all();
             })?
         };
+        dc.on_open(Box::new(|| {
+            tracing::info!("input data channel open");
+            Box::pin(async {})
+        }));
         {
             let tx = input_tx.clone();
             dc.on_message(Box::new(move |msg: DataChannelMessage| {
@@ -167,6 +171,7 @@ impl Session {
                 Box::pin(async move {
                     match std::str::from_utf8(&msg.data).map(serde_json::from_str::<InputMsg>) {
                         Ok(Ok(m)) => {
+                            tracing::trace!("input {m:?}");
                             let _ = tx.send(InputCmd::Msg(m));
                         }
                         Ok(Err(e)) => tracing::debug!("bad input message: {e}"),

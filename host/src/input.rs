@@ -5,7 +5,7 @@
 
 use crate::geom::map_to_client;
 use crate::protocol::{Button, InputMsg, KeyAction, MouseAction, PenAction, TouchAction};
-use crate::vk::{is_extended_key, VK_RETURN, VK_TAB};
+use crate::vk::{is_extended_key, us_char, VK_RETURN, VK_TAB};
 use crate::winutil::{bring_to_front, client_rect_screen, is_foreground, is_window, Hwnd};
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -279,10 +279,28 @@ pub struct Injector {
     pen: PenState,
     touch: TouchState,
     held_keys: BTreeSet<u16>,
+    /// Keys typed as Unicode on key-down (their key-up is swallowed).
+    typed_keys: BTreeSet<u16>,
     held_buttons: BTreeSet<u8>, // 0 left, 1 right, 2 middle
     mrel_x: f64,
     mrel_y: f64,
     last_focus_try: std::time::Instant,
+}
+
+/// What a `mouse` message does: the cursor always goes to x,y first (absolute semantics);
+/// a button press needs our window to have focus, a release is always sent.
+#[derive(Debug, PartialEq, Eq)]
+pub struct MousePlan {
+    pub move_cursor: bool,
+    pub send_button: bool,
+}
+
+pub fn mouse_plan(a: MouseAction, focused: bool) -> MousePlan {
+    match a {
+        MouseAction::Move => MousePlan { move_cursor: true, send_button: false },
+        MouseAction::Down => MousePlan { move_cursor: focused, send_button: focused },
+        MouseAction::Up => MousePlan { move_cursor: focused, send_button: true },
+    }
 }
 
 fn mouse_input(flags: MOUSE_EVENT_FLAGS, data: i32) -> INPUT {
@@ -331,6 +349,7 @@ impl Injector {
             pen: PenState::default(),
             touch: TouchState::default(),
             held_keys: BTreeSet::new(),
+            typed_keys: BTreeSet::new(),
             held_buttons: BTreeSet::new(),
             mrel_x: 0.0,
             mrel_y: 0.0,
@@ -338,11 +357,26 @@ impl Injector {
         }
     }
 
-    fn ensure_focus(&mut self) {
-        if !is_foreground(self.hwnd) && self.last_focus_try.elapsed() > std::time::Duration::from_millis(250) {
-            self.last_focus_try = std::time::Instant::now();
-            bring_to_front(self.hwnd);
+    /// Make sure our window is the foreground window before injecting input. Returns false
+    /// when it is not: SendInput goes to whatever has focus, so input is dropped rather than
+    /// typed into some other app the user switched to.
+    fn ensure_focus(&mut self) -> bool {
+        if is_foreground(self.hwnd) {
+            return true;
         }
+        if self.last_focus_try.elapsed() <= std::time::Duration::from_millis(250) {
+            return false;
+        }
+        self.last_focus_try = std::time::Instant::now();
+        bring_to_front(self.hwnd);
+        for _ in 0..5 {
+            if is_foreground(self.hwnd) {
+                return true;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        tracing::debug!("window {:#x} is not in the foreground; input dropped", self.hwnd);
+        false
     }
 
     /// Normalised video coords -> screen pixel position.
@@ -354,6 +388,7 @@ impl Injector {
     }
 
     pub fn handle(&mut self, msg: InputMsg) {
+        tracing::debug!("input {msg:?}");
         if !is_window(self.hwnd) {
             return;
         }
@@ -377,8 +412,13 @@ impl Injector {
     }
 
     fn mouse(&mut self, a: MouseAction, x: f64, y: f64, btn: Button) {
-        self.ensure_focus();
-        self.move_cursor(x, y);
+        let focused = self.ensure_focus();
+        let plan = mouse_plan(a, focused);
+        // Absolute semantics: the cursor goes to x,y before any button event, so a phone
+        // trackpad (which keeps its own cursor) clicks where it shows its cursor.
+        if plan.move_cursor {
+            self.move_cursor(x, y);
+        }
         let (down, up, id) = match btn {
             Button::Left => (MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP, 0u8),
             Button::Right => (MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP, 1),
@@ -387,6 +427,9 @@ impl Injector {
         match a {
             MouseAction::Move => {}
             MouseAction::Down => {
+                if !plan.send_button {
+                    return;
+                }
                 self.held_buttons.insert(id);
                 send(&[mouse_input(down, 0)]);
             }
@@ -426,7 +469,9 @@ impl Injector {
     }
 
     fn wheel(&mut self, dx: f64, dy: f64) {
-        self.ensure_focus();
+        if !self.ensure_focus() {
+            return;
+        }
         // The wheel goes to the window under the cursor: make sure it is inside our client area.
         if let Some(cr) = client_rect_screen(self.hwnd) {
             let mut p = POINT::default();
@@ -449,7 +494,32 @@ impl Injector {
     }
 
     fn key(&mut self, a: KeyAction, vk: u16) {
-        self.ensure_focus();
+        // Key-ups are always sent so a modifier never stays stuck; downs need focus.
+        if !self.ensure_focus() && a == KeyAction::Down {
+            return;
+        }
+        // Printable keys without Ctrl/Alt/Win: type the US-layout character as Unicode so the
+        // PC's own layout (Hebrew, ...) cannot change what the phone keyboard meant.
+        let mods = |v: u16| self.held_keys.contains(&v);
+        let shortcut = mods(0x11) || mods(0xA2) || mods(0xA3) || mods(0x12) || mods(0xA4) || mods(0xA5) || mods(0x5B) || mods(0x5C);
+        let shift = mods(0x10) || mods(0xA0) || mods(0xA1);
+        match a {
+            KeyAction::Down if !shortcut => {
+                if let Some(c) = us_char(vk, shift) {
+                    self.typed_keys.insert(vk);
+                    let mut buf = [0u16; 2];
+                    let mut v = Vec::new();
+                    for u in c.encode_utf16(&mut buf) {
+                        v.push(key_input(0, *u, KEYEVENTF_UNICODE));
+                        v.push(key_input(0, *u, KEYEVENTF_UNICODE | KEYEVENTF_KEYUP));
+                    }
+                    send(&v);
+                    return;
+                }
+            }
+            KeyAction::Up if self.typed_keys.remove(&vk) => return,
+            _ => {}
+        }
         let scan = unsafe { MapVirtualKeyW(vk as u32, MAPVK_VK_TO_VSC) } as u16;
         let mut flags = KEYBD_EVENT_FLAGS(0);
         if is_extended_key(vk) {
@@ -468,7 +538,9 @@ impl Injector {
     }
 
     fn text(&mut self, s: &str) {
-        self.ensure_focus();
+        if !self.ensure_focus() {
+            return;
+        }
         let mut v = Vec::new();
         for ch in s.chars() {
             match ch {
@@ -502,7 +574,9 @@ impl Injector {
 
     #[allow(clippy::too_many_arguments)]
     fn pen(&mut self, a: PenAction, x: f64, y: f64, p: f64, tx: f64, ty: f64, barrel: bool, eraser: bool) {
-        self.ensure_focus();
+        if !self.ensure_focus() {
+            return;
+        }
         let Some((sx, sy)) = self.to_screen(x, y) else { return };
         let steps = pen_step(&mut self.pen, a, barrel, eraser);
         for st in steps {
@@ -646,6 +720,16 @@ mod tests {
                 _ => None,
             })
             .collect()
+    }
+
+    #[test]
+    fn mouse_moves_cursor_before_buttons_and_never_clicks_unfocused() {
+        assert_eq!(mouse_plan(MouseAction::Down, true), MousePlan { move_cursor: true, send_button: true });
+        assert_eq!(mouse_plan(MouseAction::Up, true), MousePlan { move_cursor: true, send_button: true });
+        assert_eq!(mouse_plan(MouseAction::Move, false), MousePlan { move_cursor: true, send_button: false });
+        // not our window in front: no press, no cursor jump, but a release still goes out
+        assert_eq!(mouse_plan(MouseAction::Down, false), MousePlan { move_cursor: false, send_button: false });
+        assert!(mouse_plan(MouseAction::Up, false).send_button);
     }
 
     #[test]

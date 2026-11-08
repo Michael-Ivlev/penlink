@@ -6,7 +6,7 @@ Windows PC agent for Penlink: streams one app window to the phone over WebRTC
 ## Build / test
     cargo build --release          # target\release\penlink-host.exe
     cargo test                     # unit + HTTP/pairing smoke test
-    cargo test --test smoke -- --ignored --nocapture   # launches Notepad, checks offer SDP
+    cargo test --test smoke -- --ignored --nocapture   # launches the testpad example, checks offer SDP (build it first: cargo build --example testpad)
     cargo run --release --example client -- --png out.png   # loopback client: receives + decodes the stream
 
 ## Run
@@ -18,6 +18,18 @@ Windows PC agent for Penlink: streams one app window to the phone over WebRTC
   5 wrong guesses burn it). The phone POSTs it to `/pair` and receives a token, stored in
   `%APPDATA%\Penlink\host.json`.
 - WebRTC media uses UDP ports 47801-48800 (allow them in Windows Firewall for the Tailscale/LAN profile).
-- `appId` may also be `exe:<path or name>` (e.g. `exe:notepad.exe`) for testing.
+- `appId` may also be `exe:<path or name> [arguments]` (e.g. `exe:C:\tools\testpad.exe C:\log.txt`) for testing.
+  `/apps` lists Start Menu shortcuts plus packaged (Store) apps from `shell:AppsFolder`; a shortcut wins over a packaged
+  entry with the same name, packaged apps are launched with `IApplicationActivationManager`.
 - Opening an app resizes its window (client area = width/scale x height/scale, on the primary monitor).
   Closing a session never kills the app.
+
+## Notes from the end-to-end run
+
+- Printable keys from the phone keyboard (`key` messages, US-layout VK codes) are typed as Unicode when no
+  Ctrl/Alt/Win is held, so a PC with another active input language (for example Hebrew) still types what the
+  phone key shows. Shortcuts (Ctrl+A ...) stay real key events.
+- Input is dropped, not injected, while the streamed window is not the foreground window (SendInput would
+  otherwise go to whatever app the user switched to). Key-ups and mouse-ups are always sent.
+- Encoder: openh264, 4 threads, 1200-byte slices, camera real-time usage, low complexity (see `examples/encbench.rs`).
+- `cargo run --release --example testpad -- <log file>`: test window that logs every key/mouse/pen event it gets.

@@ -3,7 +3,7 @@
 use crate::frame::I420;
 use anyhow::{anyhow, Result};
 use openh264::encoder::{
-    BitRate, Encoder, EncoderConfig, FrameRate, IntraFramePeriod, Profile, RateControlMode, UsageType,
+    BitRate, Complexity, Encoder, EncoderConfig, FrameRate, IntraFramePeriod, Profile, RateControlMode, UsageType,
     VuiConfig,
 };
 use openh264::formats::YUVSlices;
@@ -11,6 +11,33 @@ use openh264::OpenH264API;
 
 pub const DEFAULT_BITRATE: u32 = 10_000_000;
 pub const MAX_FPS: f32 = 60.0;
+
+#[derive(Debug, Clone, Copy)]
+pub struct EncOptions {
+    pub threads: u16,
+    /// Max bytes per slice. openh264 only runs several threads when the picture is cut into
+    /// slices; with one slice per frame `threads` has no effect.
+    pub slice_len: Option<u32>,
+    pub complexity: Complexity,
+    /// ScreenContentRealTime (better text, slower) instead of CameraVideoRealTime.
+    pub screen_content: bool,
+    pub scene_detect: bool,
+}
+
+impl Default for EncOptions {
+    fn default() -> Self {
+        Self { threads: default_threads(), slice_len: Some(1200), complexity: Complexity::Low, screen_content: false, scene_detect: true }
+    }
+}
+
+/// openh264 worker threads used by default (see `examples/encbench.rs` for the measurements).
+///
+/// Measured (examples/encbench.rs, 1440x3120, typing): single slice/thread + screen-content
+/// mode 90 ms/frame (11 fps); 4 threads with 1200-byte slices + camera mode + low complexity
+/// 32 ms/frame (31 fps). Slices are also what lets the RTP packetiser avoid fragmenting NALs.
+pub fn default_threads() -> u16 {
+    4
+}
 
 pub struct H264Encoder {
     enc: Encoder,
@@ -26,18 +53,32 @@ pub struct Encoded {
 
 impl H264Encoder {
     pub fn new(w: usize, h: usize, bitrate: u32) -> Result<Self> {
-        let cfg = EncoderConfig::new()
-            .usage_type(UsageType::ScreenContentRealTime)
+        Self::with_threads(w, h, bitrate, default_threads())
+    }
+
+    /// `threads` = openh264 worker threads (1 = single threaded).
+    pub fn with_threads(w: usize, h: usize, bitrate: u32, threads: u16) -> Result<Self> {
+        Self::with_options(w, h, bitrate, EncOptions { threads, ..EncOptions::default() })
+    }
+
+    pub fn with_options(w: usize, h: usize, bitrate: u32, o: EncOptions) -> Result<Self> {
+        let mut cfg = EncoderConfig::new()
+            .num_threads(o.threads.max(1))
+            .complexity(o.complexity)
+            .usage_type(if o.screen_content { UsageType::ScreenContentRealTime } else { UsageType::CameraVideoRealTime })
             .rate_control_mode(RateControlMode::Bitrate)
             .bitrate(BitRate::from_bps(bitrate))
             .max_frame_rate(FrameRate::from_hz(MAX_FPS))
             .profile(Profile::Baseline)
             .skip_frames(true)
-            .scene_change_detect(true)
+            .scene_change_detect(o.scene_detect)
             .adaptive_quantization(false)
             .background_detection(false)
             .intra_frame_period(IntraFramePeriod::from_num_frames(0))
             .vui(VuiConfig::bt601());
+        if let Some(n) = o.slice_len {
+            cfg = cfg.max_slice_len(n);
+        }
         let enc = Encoder::with_api_config(OpenH264API::from_source(), cfg)
             .map_err(|e| anyhow!("openh264 init: {e}"))?;
         Ok(Self { enc, w, h })

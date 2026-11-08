@@ -42,6 +42,12 @@ Hardware encode and the Mac host come later. The virtual monitor per app is buil
   onto it and maximised; the host captures the MONITOR, so menus, popups and dialogs show. Input maps to the monitor
   rectangle. Input is accepted while the foreground window belongs to the app (its process or owned by its window)
   and is on that monitor.
+- **What is streamed:** the monitor's work area (the monitor minus the taskbar Explorer adds to every display, which
+  appears some seconds after the monitor does; the host checks every 750 ms, follows a changed size or position and
+  sends a new `window` message). The phone draws the video aspect-fit (black bars when the work area is a little
+  shorter than the screen). Windows caps the DPI step by resolution (the smaller side divided by the scale stays at
+  least 640 px, e.g. 225% at 1440x3120), so a higher `uiScale` is clamped; `window.dpi` and the settings readout show
+  what was applied.
 - **Keyboard:** the monitor stays. The window is restored and sized to the top rows and only those rows are
   streamed (the video is exactly the area above the keyboard, so the phone needs no cropping).
   Hiding the keyboard maximises the window again.
@@ -188,7 +194,8 @@ map to the key at the same physical position on the standard Hebrew layout (ש =
 so Ctrl+<ב> is Ctrl+C.
 
 **Keyboard and window size.** While the IME and the extra row are visible the phone shows the video only
-in the area above them and sends esize for that area (width = screen width, height = screen height minus
+in the area above them and sends 
+esize for that area (width = screen width, height = screen height minus
 IME minus row), debounced (250 ms), so the PC window gets exactly that area. Hiding the keyboard restores
 the full size.
 

@@ -375,44 +375,6 @@ pub fn work_rect(hmonitor: isize) -> Option<Rect> {
     (ok && r.right > r.left && r.bottom > r.top).then(|| Rect::new(r.left, r.top, r.right - r.left, r.bottom - r.top))
 }
 
-/// Whether Windows shows its taskbar on every display (Settings > Taskbar > "Show my taskbar on
-/// all displays", on unless the user turned it off).
-fn taskbar_on_all_displays() -> bool {
-    use windows::core::w;
-    use windows::Win32::System::Registry::{RegGetValueW, HKEY_CURRENT_USER, RRF_RT_REG_DWORD};
-    let mut v: u32 = 0;
-    let mut n = 4u32;
-    let r = unsafe {
-        RegGetValueW(
-            HKEY_CURRENT_USER,
-            w!("Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\Advanced"),
-            w!("MMTaskbarEnabled"),
-            RRF_RT_REG_DWORD,
-            None,
-            Some(&mut v as *mut u32 as *mut std::ffi::c_void),
-            Some(&mut n),
-        )
-    };
-    r.is_err() || v != 0
-}
-
-/// The work area of a freshly (re)created virtual monitor. Explorer adds the taskbar a moment
-/// after the monitor appears (and shrinks the maximised window), so wait for it, up to
-/// `max`. Without the "taskbar on all displays" setting there is nothing to wait for.
-pub fn settled_work_rect(hmonitor: isize, mon: Rect, max: Duration) -> Rect {
-    if taskbar_on_all_displays() {
-        let deadline = std::time::Instant::now() + max;
-        while std::time::Instant::now() < deadline {
-            if work_rect(hmonitor).is_some_and(|w| w != mon) {
-                std::thread::sleep(Duration::from_millis(250));
-                break;
-            }
-            std::thread::sleep(Duration::from_millis(100));
-        }
-    }
-    work_rect(hmonitor).unwrap_or(mon)
-}
-
 pub fn monitor_by_name(name: &str) -> Option<MonInfo> {
     enum_monitors().into_iter().find(|m| m.name.eq_ignore_ascii_case(name))
 }

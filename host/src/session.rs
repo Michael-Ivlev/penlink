@@ -87,6 +87,8 @@ struct MonState {
     spec: MonitorSpec,
     /// Height of the streamed part; equal to the monitor height when the whole monitor shows.
     view_h: u32,
+    /// The usable part of the monitor (no taskbar) the view is cut from.
+    work: Rect,
 }
 
 /// How a session ends.
@@ -151,9 +153,6 @@ fn h264_capability() -> RTCRtpCodecCapability {
     }
 }
 
-/// How long to wait for Explorer to put its taskbar on a new virtual monitor.
-const TASKBAR_WAIT: Duration = Duration::from_secs(4);
-
 /// The area of a virtual monitor the phone sees: its work area (no taskbar).
 fn work_of(mon: &VMonitor) -> Rect {
     crate::vdisplay::work_rect(mon.hmonitor).unwrap_or(mon.rect)
@@ -173,8 +172,7 @@ impl Session {
         if let Some((mgr, mon)) = monitor {
             // The window is already on the monitor, maximised. Stream the whole monitor.
             // Stream the work area: the monitor minus the taskbar Windows adds to every display.
-            let (hm, mr) = (mon.hmonitor, mon.rect);
-            let work = tokio::task::spawn_blocking(move || crate::vdisplay::settled_work_rect(hm, mr, TASKBAR_WAIT)).await?;
+            let work = work_of(&mon);
             let (vw, vh) = clamp_video(work.w.max(2) as u32, work.h.max(2) as u32);
             let pid = winutil::window_pid(hwnd);
             let target = MonitorTarget::new(hwnd, pid, mon.rect);
@@ -191,7 +189,7 @@ impl Session {
             let spec = MonitorSpec { w: mon.rect.w as u32, h: mon.rect.h as u32, dpi_wanted: mon.dpi_wanted };
             monitor_session = Some(MonitorSession {
                 mgr,
-                state: StdMutex::new(MonState { view_h: work.h as u32, spec, mon }),
+                state: StdMutex::new(MonState { view_h: work.h as u32, spec, mon, work }),
             });
         } else {
             // Size the app window first so the first captured frame is already right.
@@ -367,6 +365,7 @@ impl Session {
             ev_tx,
             ctl_slot: pipeline_ctl_slot,
         });
+        session.spawn_view_watch();
         Ok(OpenedSession { session, window, ice_rx, events_rx })
     }
 
@@ -440,7 +439,6 @@ impl Session {
                 let new_mon = match tokio::task::spawn_blocking(move || -> Result<VMonitor> {
                     let m = mgr.reconfigure(&m2, w, h, dpi)?;
                     winutil::place_maximized_on(hwnd, m.rect)?;
-                    crate::vdisplay::settled_work_rect(m.hmonitor, m.rect, TASKBAR_WAIT);
                     Ok(m)
                 })
                 .await?
@@ -497,12 +495,81 @@ impl Session {
             mode: StreamMode::Monitor,
             dpi: Some(mon.dpi_actual),
         };
-        *ms.state.lock().unwrap() = MonState { mon, spec, view_h };
+        *ms.state.lock().unwrap() = MonState { mon, spec, view_h, work };
         if matches!(action, ResizeAction::Reconfigure { .. }) {
             self.start_pipeline(CaptureSource::Monitor { hmonitor, watch: hwnd });
         }
         self.request_keyframe();
         Ok(report)
+    }
+
+    /// Explorer adds the taskbar to a virtual monitor some time after it appears (and Windows
+    /// moves monitors around when another one goes), so the streamed area is checked now and
+    /// then: the video follows the monitor's position and work area, and the phone is told.
+    fn spawn_view_watch(self: &Arc<Self>) {
+        if self.monitor.is_none() {
+            return;
+        }
+        let weak = Arc::downgrade(self);
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(Duration::from_millis(750)).await;
+                let Some(s) = weak.upgrade() else { break };
+                if s.closed.load(Ordering::SeqCst) {
+                    break;
+                }
+                s.sync_view().await;
+            }
+        });
+    }
+
+    async fn sync_view(&self) {
+        let Some(ms) = self.monitor.as_ref() else { return };
+        let _g = self.resize_lock.lock().await;
+        let (mut mon, old_work, view_h) = {
+            let st = ms.state.lock().unwrap();
+            (st.mon.clone(), st.work, st.view_h)
+        };
+        if let Some(m) = crate::vdisplay::monitor_by_name(&mon.gdi_name) {
+            mon.hmonitor = m.hmonitor;
+            mon.rect = m.rect;
+        }
+        let work = work_of(&mon);
+        let moved = self.shared_monitor_rect().is_some_and(|r| r != mon.rect);
+        if work == old_work && !moved {
+            return;
+        }
+        let was_full = view_h >= old_work.h as u32;
+        let new_view_h = if was_full { work.h as u32 } else { view_h.min(work.h as u32) };
+        let view = Rect::new(work.x, work.y, work.w, new_view_h as i32);
+        if let InputTarget::Monitor(t) = &self.shared.target {
+            t.set(mon.rect, view);
+        }
+        tracing::info!("virtual monitor {} now at {},{} work area {}x{}: streaming {}x{}", mon.gdi_name, mon.rect.x, mon.rect.y, work.w, work.h, view.w, view.h);
+        let size_changed = work.w != old_work.w || new_view_h != view_h;
+        if size_changed {
+            let (vw, vh) = clamp_video(view.w.max(2) as u32, view.h.max(2) as u32);
+            self.shared.video_w.store(vw, Ordering::Relaxed);
+            self.shared.video_h.store(vh, Ordering::Relaxed);
+        }
+        let dpi = mon.dpi_actual;
+        {
+            let mut st = ms.state.lock().unwrap();
+            st.mon = mon;
+            st.work = work;
+            st.view_h = new_view_h;
+        }
+        if size_changed {
+            self.request_keyframe();
+            let _ = self.ev_tx.send(PipelineEvent::Window(WindowReport { width: view.w, height: view.h, fitted: false, mode: StreamMode::Monitor, dpi: Some(dpi) }));
+        }
+    }
+
+    fn shared_monitor_rect(&self) -> Option<Rect> {
+        match &self.shared.target {
+            InputTarget::Monitor(t) => Some(t.monitor_rect()),
+            _ => None,
+        }
     }
 
     async fn stop_pipeline(&self) {

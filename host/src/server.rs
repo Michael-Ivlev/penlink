@@ -725,16 +725,23 @@ async fn do_open(
     // Window closed / pipeline error.
     let mut events_rx = opened.events_rx;
     tokio::spawn(async move {
-        if let Some(ev) = events_rx.recv().await {
+        while let Some(ev) = events_rx.recv().await {
             let reason = match ev {
                 PipelineEvent::WindowClosed => "app exited".to_string(),
                 PipelineEvent::Error(e) => format!("error: {e}"),
+                PipelineEvent::Window(w) => {
+                    if sessions.ready.lock().await.contains_key(&session_id) {
+                        let _ = out.send(window_msg(&session_id, &w));
+                    }
+                    continue;
+                }
             };
             let removed = sessions.ready.lock().await.remove(&session_id);
             if removed.is_some() {
                 session.close().await;
                 let _ = out.send(ServerMsg::Closed { session_id, reason });
             }
+            break;
         }
     });
 }

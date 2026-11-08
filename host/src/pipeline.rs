@@ -63,6 +63,8 @@ pub enum PipelineEvent {
     /// The captured window no longer exists.
     WindowClosed,
     Error(String),
+    /// Monitor mode: the streamed area changed size (taskbar appeared, DPI changed).
+    Window(crate::session::WindowReport),
 }
 
 #[derive(Default)]

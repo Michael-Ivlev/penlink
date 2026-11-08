@@ -74,7 +74,11 @@ import dev.penlink.ui.theme.Spacing
 import dev.penlink.ui.theme.extra
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.isActive
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.compose.LocalLifecycleOwner
+import androidx.lifecycle.repeatOnLifecycle
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeoutOrNull
 
@@ -98,20 +102,26 @@ fun HostsScreen(app: PenlinkApp) {
     var probeTick by remember { mutableIntStateOf(0) }
     val statuses = remember { mutableStateMapOf<String, HostStatus>() }
     val scroll = TopAppBarDefaults.exitUntilCollapsedScrollBehavior()
+    val lifecycle = LocalLifecycleOwner.current.lifecycle
 
     // Cheap reachability probe: GET /info with a short timeout, now and every 20 s while this screen is shown.
     LaunchedEffect(hostsOrNull, probeTick) {
         val hosts = hostsOrNull ?: return@LaunchedEffect
         statuses.keys.retainAll(hosts.map { it.address }.toSet())
         for (h in hosts) if (h.address !in statuses) statuses[h.address] = HostStatus.Checking
-        while (isActive) {
-            coroutineScope {
-                for (h in hosts) launch {
-                    val info = withTimeoutOrNull(PROBE_TIMEOUT_MS) { runCatching { app.api.info(h.address) }.getOrNull() }
-                    statuses[h.address] = if (info != null) HostStatus.Online else HostStatus.Offline
+        // Only while the app is in the foreground: leaving the app stops the loop, coming back probes at once.
+        lifecycle.repeatOnLifecycle(Lifecycle.State.STARTED) {
+            while (isActive) {
+                coroutineScope {
+                    for (h in hosts) launch {
+                        val info = withTimeoutOrNull(PROBE_TIMEOUT_MS) { runCatching { app.api.info(h.address) }.getOrNull() }
+                        // runCatching swallows cancellation: a cancelled (refreshed / left) probe must not write "Offline".
+                        ensureActive()
+                        statuses[h.address] = if (info != null) HostStatus.Online else HostStatus.Offline
+                    }
                 }
+                delay(PROBE_EVERY_MS)
             }
-            delay(PROBE_EVERY_MS)
         }
     }
 

@@ -14,6 +14,17 @@ object HostAddress {
         return if (hasPort) s else "$s:$DEFAULT_PORT"
     }
 
+    /** Whether [input] normalises to something an HTTP client can open (no spaces, a numeric port, a host). */
+    fun isValid(input: String): Boolean {
+        val n = normalize(input) ?: return false
+        if (n.any { it.isWhitespace() }) return false
+        val bracket = n.startsWith("[")
+        val port = if (bracket) n.substringAfter("]:", "") else n.substringAfterLast(':', "")
+        val host = if (bracket) n.substringBefore("]:") else n.substringBeforeLast(':')
+        val p = port.toIntOrNull() ?: return false
+        return p in 1..65535 && host.isNotEmpty() && host != "["
+    }
+
     fun httpBase(address: String): String = "http://$address"
     fun wsUrl(address: String, token: String): String = "ws://$address/ws?token=$token"
 }

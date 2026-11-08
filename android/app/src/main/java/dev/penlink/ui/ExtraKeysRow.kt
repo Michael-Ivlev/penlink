@@ -17,6 +17,7 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.State
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -64,6 +65,8 @@ fun ExtraKeysRow(
     logic: KeyboardLogic,
     onKeys: (List<KeyAction>) -> Unit,
     modifier: Modifier = Modifier,
+    /** Bumped by whoever changes [logic] from outside this row (phone-keyboard text consuming a one-shot modifier). */
+    externalVersion: State<Int>? = null,
 ) {
     var fn by remember { mutableStateOf(false) }
     var version by remember { mutableIntStateOf(0) } // bump to re-read modifier state
@@ -82,6 +85,7 @@ fun ExtraKeysRow(
     }
 
     @Suppress("UNUSED_EXPRESSION") version
+    @Suppress("UNUSED_EXPRESSION") externalVersion?.value
     val bar = MaterialTheme.colorScheme.surfaceContainer.copy(alpha = 0.96f)
     val hairline = MaterialTheme.colorScheme.outlineVariant
     Row(

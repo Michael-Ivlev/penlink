@@ -26,3 +26,19 @@ class PairUiTest {
         assertTrue(friendlyPairError(PairException("Host answered 500"), "pc").contains("refused to pair"))
     }
 }
+
+class HostAddressValidTest {
+    @Test
+    fun acceptsUsableAddresses() {
+        for (a in listOf("100.64.0.1", "pc:47800", "http://10.0.2.2", "my-pc.tailnet.ts.net", "[fd7a::1]:47800", " 10.0.2.2 ")) {
+            assertTrue(a, dev.penlink.protocol.HostAddress.isValid(a))
+        }
+    }
+
+    @Test
+    fun rejectsUnusableAddresses() {
+        for (a in listOf("", "   ", "hello world", "10.0.2.2:abc", "10.0.2.2:99999", "10.0.2.2:0", ":47800", "a b:47800")) {
+            assertTrue(a, !dev.penlink.protocol.HostAddress.isValid(a))
+        }
+    }
+}

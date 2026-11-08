@@ -28,7 +28,9 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.consumeWindowInsets
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.offset
@@ -129,10 +131,11 @@ fun PairScreen(app: PenlinkApp) {
     var error by remember { mutableStateOf<String?>(null) }
     var addressTouched by remember { mutableStateOf(false) }
     var failTick by remember { mutableIntStateOf(0) }
+    var focusCodeAfterFail by remember { mutableStateOf(false) }
     val addressFocus = remember { FocusRequester() }
     val codeFocus = remember { FocusRequester() }
 
-    val normalized = HostAddress.normalize(address)
+    val normalized = HostAddress.normalize(address)?.takeIf { HostAddress.isValid(address) }
     val canSubmit = !busy && normalized != null && code.length == PAIR_CODE_LENGTH
     val back = { if (!busy) app.navigate(Screen.Hosts) }
     BackHandler { back() }
@@ -154,8 +157,8 @@ fun PairScreen(app: PenlinkApp) {
                 haptics.reject()
                 error = friendlyPairError(e, addr)
                 if (e is PairException) code = ""
+                focusCodeAfterFail = e is PairException
                 failTick++
-                if (e is PairException) codeFocus.requestFocus() else addressFocus.requestFocus()
             } finally {
                 busy = false
             }
@@ -164,6 +167,12 @@ fun PairScreen(app: PenlinkApp) {
 
     // Typing the sixth digit pairs straight away (once the address is valid).
     LaunchedEffect(code) { if (code.length == PAIR_CODE_LENGTH && normalized != null && !busy) submit() }
+    // After a failure, put the cursor where the fix is. Done in an effect, not in the catch: the fields are disabled
+    // while busy and a disabled field cannot take focus; by the time this runs `busy` is false again.
+    LaunchedEffect(failTick) {
+        if (failTick == 0) return@LaunchedEffect
+        if (focusCodeAfterFail) codeFocus.requestFocus() else addressFocus.requestFocus()
+    }
     LaunchedEffect(Unit) { if (address.isEmpty()) addressFocus.requestFocus() else codeFocus.requestFocus() }
 
     Scaffold(
@@ -181,7 +190,8 @@ fun PairScreen(app: PenlinkApp) {
         },
     ) { padding ->
         Column(
-            Modifier.padding(padding).fillMaxWidth().verticalScroll(rememberScrollState()).padding(horizontal = Spacing.xl),
+            // The window does not resize for the keyboard (adjustNothing + edge-to-edge): lift the form above it.
+            Modifier.padding(padding).consumeWindowInsets(padding).imePadding().fillMaxWidth().verticalScroll(rememberScrollState()).padding(horizontal = Spacing.xl),
             horizontalAlignment = Alignment.CenterHorizontally,
         ) {
             Box(

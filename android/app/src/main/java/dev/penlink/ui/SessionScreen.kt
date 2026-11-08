@@ -191,8 +191,10 @@ fun SessionScreen(app: PenlinkApp, conn: HostConnection, selectedId: Long) {
             .collect { o.setKeyboardCovered(it, panMarginPx) }
     }
 
+    val modVersion = remember { mutableIntStateOf(0) }
     fun sendKeys(actions: List<KeyAction>) {
         for (a in actions) current.sendInput(InputMsg.key(a.down, a.vk))
+        modVersion.intValue++ // a one-shot modifier may have just been used up: redraw the extra-keys row
     }
 
     // Keyboard hidden (or tab switched): let go of any sticky modifier.
@@ -359,6 +361,7 @@ fun SessionScreen(app: PenlinkApp, conn: HostConnection, selectedId: Long) {
             ExtraKeysRow(
                 logic = keyLogic,
                 onKeys = { sendKeys(it) },
+                externalVersion = modVersion,
                 modifier = Modifier.align(Alignment.BottomCenter).windowInsetsPadding(WindowInsets.ime)
                     // Slides up from behind the keyboard during the first row-height of its animation.
                     .offset { IntOffset(0, rowPx - KeyboardPan.rowShown(imeInsets.getBottom(density), rowPx).toInt()) }

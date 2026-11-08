@@ -19,7 +19,8 @@ use windows::Win32::UI::HiDpi::{
     DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    BringWindowToTop, EnumWindows, GetClientRect, GetForegroundWindow, GetMenu, GetWindow,
+    BringWindowToTop, EnumWindows, GetAncestor, GetClientRect, GetForegroundWindow, GetLastActivePopup, GetMenu, GetWindow,
+    GA_ROOTOWNER, SW_MAXIMIZE,
     GetWindowLongPtrW, GetWindowRect, GetWindowTextLengthW, GetWindowTextW, GetWindowThreadProcessId,
     IsIconic, IsWindow, IsWindowVisible, IsZoomed, SetForegroundWindow, SetWindowPos,
     ShowWindow, SystemParametersInfoW, GWL_EXSTYLE, GWL_STYLE, GW_OWNER, SPI_GETWORKAREA,
@@ -315,4 +316,148 @@ pub fn bring_to_front(h: Hwnd) {
 
 pub fn is_foreground(h: Hwnd) -> bool {
     unsafe { GetForegroundWindow() == hwnd(h) }
+}
+
+// ---------------------------------------------------------------------------------------
+// Virtual monitor mode: windows on a monitor, the foreground window's owner
+
+pub fn window_rect(h: Hwnd) -> Option<Rect> {
+    let mut r = RECT::default();
+    unsafe { GetWindowRect(hwnd(h), &mut r).ok()? };
+    Some(rect_from(r))
+}
+
+pub fn is_maximized(h: Hwnd) -> bool {
+    unsafe { IsZoomed(hwnd(h)).as_bool() }
+}
+
+/// The window the user (or we) last gave focus.
+#[derive(Debug, Clone, Copy)]
+pub struct Foreground {
+    pub hwnd: Hwnd,
+    pub pid: u32,
+    pub rect: Rect,
+    /// Top-most owner: a dialog's owner is the app window it belongs to.
+    pub root_owner: Hwnd,
+}
+
+pub fn foreground_info() -> Option<Foreground> {
+    unsafe {
+        let fg = GetForegroundWindow();
+        if fg.0.is_null() {
+            return None;
+        }
+        let h = fg.0 as isize;
+        let owner = GetAncestor(fg, GA_ROOTOWNER);
+        Some(Foreground {
+            hwnd: h,
+            pid: window_pid(h),
+            rect: window_rect(h)?,
+            root_owner: if owner.0.is_null() { h } else { owner.0 as isize },
+        })
+    }
+}
+
+/// The window of the app that should get focus: its last active popup (a dialog) or the
+/// window itself.
+pub fn last_active_popup(h: Hwnd) -> Hwnd {
+    unsafe {
+        let p = GetLastActivePopup(hwnd(h));
+        if p.0.is_null() { h } else { p.0 as isize }
+    }
+}
+
+fn restore_if_needed(w: HWND) {
+    unsafe {
+        if IsIconic(w).as_bool() || IsZoomed(w).as_bool() {
+            let _ = ShowWindow(w, SW_RESTORE);
+            std::thread::sleep(std::time::Duration::from_millis(150));
+        }
+    }
+}
+
+/// Move the app window onto the monitor `mon` and maximise it there. Errors when the window
+/// did not end up on the monitor (some windows refuse to move).
+pub fn place_maximized_on(h: Hwnd, mon: Rect) -> Result<()> {
+    unsafe {
+        let w = hwnd(h);
+        if !IsWindow(Some(w)).as_bool() {
+            return Err(anyhow!("window is gone"));
+        }
+        // Already maximised on this monitor (a phone that came back): nothing to do.
+        if IsZoomed(w).as_bool()
+            && window_rect(h).is_some_and(|r| crate::sizing::rect_contains(mon, crate::sizing::rect_center(r)))
+        {
+            return Ok(());
+        }
+        restore_if_needed(w);
+        // A normal window first, so the maximise below picks this monitor.
+        let (ww, wh) = ((mon.w * 3 / 4).max(200), (mon.h * 3 / 4).max(200));
+        let _ = SetWindowPos(w, None, mon.x + mon.w / 8, mon.y + mon.h / 8, ww, wh, SWP_NOZORDER | SWP_NOACTIVATE);
+        std::thread::sleep(std::time::Duration::from_millis(60));
+        let _ = ShowWindow(w, SW_MAXIMIZE);
+        let mut ok = false;
+        for _ in 0..20 {
+            std::thread::sleep(std::time::Duration::from_millis(80));
+            if let Some(r) = window_rect(h) {
+                if crate::sizing::rect_contains(mon, crate::sizing::rect_center(r)) && IsZoomed(w).as_bool() {
+                    ok = true;
+                    break;
+                }
+            }
+        }
+        if !ok && !IsZoomed(w).as_bool() {
+            // Not maximisable (fixed-size window): make it cover the monitor as far as it allows.
+            let _ = SetWindowPos(w, None, mon.x, mon.y, mon.w, mon.h, SWP_NOZORDER | SWP_NOACTIVATE);
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        match window_rect(h) {
+            Some(r) if crate::sizing::rect_contains(mon, crate::sizing::rect_center(r)) => Ok(()),
+            _ => Err(anyhow!("the window did not move onto the virtual monitor")),
+        }
+    }
+}
+
+/// Restore the window and give its visible frame exactly the rectangle `view` (screen
+/// coordinates). Used while the phone keyboard covers the lower part of the screen.
+pub fn place_view_on(h: Hwnd, view: Rect) -> Result<Rect> {
+    unsafe {
+        let w = hwnd(h);
+        if !IsWindow(Some(w)).as_bool() {
+            return Err(anyhow!("window is gone"));
+        }
+        restore_if_needed(w);
+        let (mut l, mut t, mut r, mut b) = (0, 0, 0, 0);
+        for _ in 0..3 {
+            let _ = SetWindowPos(w, None, view.x - l, view.y - t, view.w + l + r, view.h + t + b, SWP_NOZORDER | SWP_NOACTIVATE);
+            if let (Some(win), Some(frame)) = (window_rect(h), frame_bounds(h)) {
+                // invisible resize borders around the visible frame
+                l = frame.x - win.x;
+                t = frame.y - win.y;
+                r = (win.x + win.w) - (frame.x + frame.w);
+                b = (win.y + win.h) - (frame.y + frame.h);
+            }
+        }
+        frame_bounds(h).ok_or_else(|| anyhow!("no window frame"))
+    }
+}
+
+/// The virtual monitor is going away: if the app window is on it, put the window on the
+/// primary monitor (un-maximised, inside the work area) instead of leaving it to Windows.
+pub fn return_window_to_primary(h: Hwnd, from: Rect) {
+    unsafe {
+        let w = hwnd(h);
+        if !IsWindow(Some(w)).as_bool() {
+            return;
+        }
+        let Some(r) = window_rect(h) else { return };
+        if !crate::sizing::rect_contains(from, crate::sizing::rect_center(r)) {
+            return; // the user moved it elsewhere: leave it alone
+        }
+        restore_if_needed(w);
+        let r = window_rect(h).unwrap_or(r);
+        let to = crate::sizing::evacuation_rect(r, primary_work_area());
+        let _ = SetWindowPos(w, None, to.x, to.y, to.w, to.h, SWP_NOZORDER | SWP_NOACTIVATE);
+        tracing::info!("window {h:#x} moved back to the primary monitor");
+    }
 }

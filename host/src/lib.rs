@@ -1,6 +1,7 @@
 //! Penlink host: streams one Windows app window to a phone over WebRTC.
 
 pub mod apps;
+pub mod crash;
 pub mod encode;
 pub mod frame;
 pub mod geom;

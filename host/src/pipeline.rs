@@ -216,6 +216,7 @@ fn run(
     let mut last_idr = Instant::now();
     let mut dirty = false; // new frame converted but not yet encoded
     let mut last_stats = Instant::now();
+    let mut encode_errors = 0u32;
 
     loop {
         if ctl.stop.load(Ordering::SeqCst) {
@@ -318,7 +319,26 @@ fn run(
             last_idr = Instant::now();
         }
         let t1 = Instant::now();
-        let out = enc.encode(&yuv)?;
+        let out = match enc.encode(&yuv) {
+            Ok(o) => {
+                encode_errors = 0;
+                o
+            }
+            Err(e) => {
+                // One bad frame must not end the session: start a fresh encoder and carry on;
+                // give up only if it keeps failing.
+                encode_errors += 1;
+                tracing::warn!("encode failed ({encode_errors}): {e}");
+                if encode_errors >= 5 {
+                    return Err(e);
+                }
+                enc = H264Encoder::new(vw, vh, DEFAULT_BITRATE)?;
+                ctl.want_keyframe.store(true, Ordering::SeqCst);
+                dirty = true;
+                std::thread::sleep(Duration::from_millis(20));
+                continue;
+            }
+        };
         ctl.stats.encode_us.fetch_add(t1.elapsed().as_micros() as u64, Ordering::Relaxed);
         last_encode = Instant::now();
         dirty = false;

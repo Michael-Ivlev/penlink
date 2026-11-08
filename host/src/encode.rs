@@ -36,7 +36,8 @@ impl Default for EncOptions {
 /// mode 90 ms/frame (11 fps); 4 threads with 1200-byte slices + camera mode + low complexity
 /// 32 ms/frame (31 fps). Slices are also what lets the RTP packetiser avoid fragmenting NALs.
 pub fn default_threads() -> u16 {
-    4
+    // PENLINK_ENC_THREADS: diagnostics / stress runs only.
+    std::env::var("PENLINK_ENC_THREADS").ok().and_then(|v| v.parse::<u16>().ok()).filter(|n| (1..=16).contains(n)).unwrap_or(4)
 }
 
 pub struct H264Encoder {
@@ -175,6 +176,42 @@ mod tests {
         let k = enc.encode(&yuv).unwrap().expect("forced idr");
         assert!(k.is_key);
         assert!(nal_types(&k.data).contains(&5));
+    }
+
+    /// Every video size the phone can ask for must encode at every thread count (found by the
+    /// stress run: some size / slice / thread combinations made openh264 return an error).
+    #[test]
+    fn all_sizes_and_thread_counts_encode() {
+        let sizes = [
+            (1440, 3120), (3120, 1440), (720, 1560), (1080, 2340), (1002, 776), (200, 400), (64, 64), (66, 66),
+            (96, 64), (3840, 2160), (2160, 3840), (2560, 1080), (3840, 468), (468, 3840), (64, 3840),
+        ];
+        let mut failures = Vec::new();
+        for threads in 1..=4u16 {
+            for &(w, h) in &sizes {
+                let mut enc = match H264Encoder::with_threads(w, h, DEFAULT_BITRATE, threads) {
+                    Ok(e) => e,
+                    Err(e) => {
+                        failures.push(format!("{w}x{h} t{threads}: init {e}"));
+                        continue;
+                    }
+                };
+                let mut yuv = I420::new(w, h);
+                let mut conv = Converter::new();
+                for frame in 0..3 {
+                    let src = gradient_bgra(w.min(640), h.min(640), frame * 5);
+                    conv.convert(&src, w.min(640) * 4, Rect::new(0, 0, w.min(640) as i32, h.min(640) as i32), &mut yuv);
+                    if frame == 2 {
+                        enc.force_keyframe();
+                    }
+                    if let Err(e) = enc.encode(&yuv) {
+                        failures.push(format!("{w}x{h} t{threads} frame {frame}: {e}"));
+                        break;
+                    }
+                }
+            }
+        }
+        assert!(failures.is_empty(), "encode failures:\n{}", failures.join("\n"));
     }
 
     #[test]

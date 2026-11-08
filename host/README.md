@@ -33,3 +33,14 @@ Windows PC agent for Penlink: streams one app window to the phone over WebRTC
   otherwise go to whatever app the user switched to). Key-ups and mouse-ups are always sent.
 - Encoder: openh264, 4 threads, 1200-byte slices, camera real-time usage, low complexity (see `examples/encbench.rs`).
 - `cargo run --release --example testpad -- <log file>`: test window that logs every key/mouse/pen event it gets.
+
+## Crash reports and stress test
+
+- An unhandled exception (for example an access violation) writes `%APPDATA%\Penlink\crash\crash-<time>-<pid>.txt`
+  (code, `module+offset`, unwound stack) and a `.dmp` minidump. Map offsets with the PDB (release builds have line tables).
+- `cargo run --release --example stress -- --secs 300 --workers 4 --round-secs 75 --threads 4,2,1,3 [--share-exe]`
+  starts `penlink-host.exe` as a child (own token store) and drives it through HTTP/WebSocket/WebRTC with several
+  concurrent testpad sessions: random sizes/scales, resize storms, input of every kind, closing, killing the app,
+  dropping the WebSocket, closing while launching, encoder thread counts per round (`PENLINK_ENC_THREADS`).
+  It only opens and kills copies named `plstress-tp<N>.exe` that it makes itself. Build the host and examples first.
+- `/open` sizes above 3840x2160 (or 2160x3840) are scaled down to that box (openh264 limit).

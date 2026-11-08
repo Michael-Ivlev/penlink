@@ -77,6 +77,22 @@ pub fn fit_within(w: i32, h: i32, max_w: i32, max_h: i32) -> (i32, i32) {
     (((w as f64 * s).floor() as i32).max(1), ((h as f64 * s).floor() as i32).max(1))
 }
 
+/// openh264 refuses frames larger than 3840x2160 (landscape) or 2160x3840 (portrait).
+pub const MAX_LONG_SIDE: u32 = 3840;
+pub const MAX_SHORT_SIDE: u32 = 2160;
+
+/// Largest video size the encoder accepts that keeps the aspect ratio of `w` x `h`
+/// (unchanged when it already fits). Result is even and at least 2.
+pub fn clamp_video(w: u32, h: u32) -> (u32, u32) {
+    let (w, h) = (w.max(2), h.max(2));
+    let (long, short) = if w >= h { (MAX_LONG_SIDE, MAX_SHORT_SIDE) } else { (MAX_SHORT_SIDE, MAX_LONG_SIDE) };
+    if w <= long && h <= short {
+        return (even(w), even(h));
+    }
+    let s = (long as f64 / w as f64).min(short as f64 / h as f64);
+    (even((w as f64 * s).floor() as u32), even((h as f64 * s).floor() as u32))
+}
+
 /// Round a video dimension to an even number >= 2 (H.264 4:2:0).
 pub fn even(v: u32) -> u32 {
     (v & !1).max(2)
@@ -154,6 +170,21 @@ mod tests {
     fn fit_within_bounds() {
         assert_eq!(fit_within(720, 1560, 1920, 1000), (461, 1000));
         assert_eq!(fit_within(100, 100, 1920, 1000), (100, 100));
+    }
+
+    #[test]
+    fn video_size_is_clamped_to_encoder_limits() {
+        assert_eq!(clamp_video(1440, 3120), (1440, 3120));
+        assert_eq!(clamp_video(3840, 2160), (3840, 2160));
+        assert_eq!(clamp_video(2160, 3840), (2160, 3840));
+        assert_eq!(clamp_video(3120, 1440), (3120, 1440));
+        // too wide: shrink, keep the aspect
+        assert_eq!(clamp_video(8192, 1000), (3840, 468));
+        assert_eq!(clamp_video(1000, 8192), (468, 3840));
+        // portrait phone that is bigger than 2160 wide
+        let (w, h) = clamp_video(4320, 9360);
+        assert!(w <= 2160 && h <= 3840 && w % 2 == 0 && h % 2 == 0, "{w}x{h}");
+        assert_eq!(clamp_video(1, 1), (2, 2));
     }
 
     #[test]

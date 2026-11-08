@@ -133,5 +133,8 @@ class KeyboardPanTest {
         assertEquals(on, StreamPrefs.decode(on.encode()))
         assertEquals(StreamPrefs(false, 200, false), StreamPrefs.decode("v2:fast:200:x"))
         assertTrue(on.fitted(1440, 3120).resizeAboveKeyboard)
+        // old saved values (3 parts) still load, and the flag survives a quality/size change via copy
+        assertEquals(StreamPrefs(true, 150, false), StreamPrefs.decode("v2:sharp:150"))
+        assertTrue(on.copy(sharpText = false, uiScale = 200).resizeAboveKeyboard)
     }
 }

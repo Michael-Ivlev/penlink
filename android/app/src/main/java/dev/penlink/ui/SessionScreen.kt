@@ -209,7 +209,7 @@ fun SessionScreen(app: PenlinkApp, conn: HostConnection, selectedId: Long) {
     // measured or laid out and the SurfaceView is never resized.
     val safeBNow by rememberUpdatedState(safeB)
     val panMarginPx = with(density) { 24.dp.toPx() }
-    LaunchedEffect(overlayRef, resizeAbove) {
+    LaunchedEffect(overlayRef, resizeAbove, rowPx) {
         val o = overlayRef ?: return@LaunchedEffect
         if (resizeAbove) {
             o.setKeyboardCovered(0f, panMarginPx)

@@ -87,13 +87,25 @@ class InputOverlayView(context: Context) : View(context) {
         }
     }
 
+    /** Focus of the press in progress; applied when the gesture ends so the picture never moves under a finger that is down. */
+    private var pendingFocusNormY = Double.NaN
+
     /**
-     * A press at view point ([x], [y]) (as displayed now). While the keyboard is up a press only moves the focus further
-     * down (needing more pan), never back up, so tapping higher in the visible area does not make the picture jump.
+     * A press at view point ([x], [y]) (as displayed now). Only remembered here: moving the picture mid-gesture would make
+     * the Move/Up of the same gesture map to a different spot than its Down (a tap would become a drag).
      */
     private fun noteFocus(x: Float, y: Float) = noteFocusNorm(mapper().toNorm(x, y).y)
 
-    private fun noteFocusNorm(ny: Double) {
+    private fun noteFocusNorm(ny: Double) { pendingFocusNormY = ny }
+
+    /**
+     * Gesture over: the remembered press becomes the focus. While the keyboard is up it only moves the focus further
+     * down (needing more pan), never back up, so tapping higher in the visible area does not make the picture jump.
+     */
+    private fun commitFocus() {
+        val ny = pendingFocusNormY
+        pendingFocusNormY = Double.NaN
+        if (ny.isNaN()) return
         if (covered > 0f && !focusNormY.isNaN() && ny <= focusNormY) return
         focusNormY = ny
         updateKeyboardPan()
@@ -183,6 +195,7 @@ class InputOverlayView(context: Context) : View(context) {
             MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
                 sendPen(PenAction.Up, e, idx, -1)
                 penActive = false
+                commitFocus()
             }
             else -> {} // other pointers while the pen is down are ignored (palm rejection)
         }
@@ -202,6 +215,7 @@ class InputOverlayView(context: Context) : View(context) {
             MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
                 sink(InputMsg.mouse(MouseAction.Up, n.x, n.y, mouseButton))
                 mouseActive = false
+                commitFocus()
             }
         }
         return true
@@ -260,10 +274,10 @@ class InputOverlayView(context: Context) : View(context) {
     }
 
     private fun clickAtCursor(btn: MouseButton) {
-        if (btn == MouseButton.Left) noteFocusNorm(cursorY)
         sink(InputMsg.mouse(MouseAction.Move, cursorX, cursorY, btn))
         sink(InputMsg.mouse(MouseAction.Down, cursorX, cursorY, btn))
         sink(InputMsg.mouse(MouseAction.Up, cursorX, cursorY, btn))
+        if (btn == MouseButton.Left) { noteFocusNorm(cursorY); commitFocus() }
     }
 
     private fun handleFinger(e: MotionEvent): Boolean {
@@ -301,6 +315,7 @@ class InputOverlayView(context: Context) : View(context) {
                         dragging = false
                     }
                     mode = Mode.Two
+                    pendingFocusNormY = Double.NaN // a pinch or scroll is not a tap
                     twoKind = Two.Undecided
                     twoStartT = e.eventTime
                     twoStartDist = Gesture.distance(e.getX(0), e.getY(0), e.getX(1), e.getY(1))
@@ -360,6 +375,7 @@ class InputOverlayView(context: Context) : View(context) {
     }
 
     private fun resetFinger() {
+        commitFocus()
         mode = Mode.Idle
         touchSent = false
         dragging = false

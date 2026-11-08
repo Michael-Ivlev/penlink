@@ -1,4 +1,4 @@
-# Penlink: spec
+﻿# Penlink: spec
 
 Run one PC app full screen on a Galaxy S26 Ultra, with or without the S Pen.
 Windows first, Mac later. Used mainly for coding, plus general apps.
@@ -63,10 +63,16 @@ One WebSocket per phone; each opened app is a *session* with its own
 WebRTC peer connection.
 
 Phone → host:
-- `{"type":"open","appId":"...","width":1440,"height":3120,"scale":2.0}`
+- `{"type":"open","appId":"...","width":1440,"height":3120,"scale":2.0,"attach":false}`
   width/height = video size in pixels; scale = how much bigger the phone wants
   the UI than 100% (the host sizes the window to width/scale × height/scale
-  and the video stays at width×height).
+  and the video stays at width×height). The encoder limit is 3840×2160 (or 2160×3840): a larger
+  request keeps its aspect ratio and the video is scaled down to fit that box.
+  `attach` (optional, default false): do not launch the app, only take an existing window of it
+  that no other session uses; none found → `closed` with reason `app exited`. Used when the phone
+  re-opens its tabs after reconnecting. A window is never shared by two sessions.
+  If the window does not fit the PC screen the host shrinks it, keeping the aspect ratio of the
+  request, and still encodes the video at the requested pixel size (the picture is upscaled).
 - `{"type":"answer","sessionId":"...","sdp":"..."}`
 - `{"type":"ice","sessionId":"...","candidate":"...","sdpMid":"0","sdpMLineIndex":0}`
 - `{"type":"resize","sessionId":"...","width":3120,"height":1440,"scale":2.0}`
@@ -79,6 +85,11 @@ Host → phone:
   sessionId; `title` may be empty. The phone shows a pending tab (spinner).
 - `{"type":"title","sessionId":"...","title":"..."}` optional; the window title,
   once the window has been found (sent before `offer`).
+- `{"type":"window","sessionId":"...","width":812,"height":1760,"fitted":true}` the real size of the
+  PC window's client area in PC pixels, sent before `offer` and after every `resize`. `fitted` is true
+  when the request was shrunk to fit the PC screen (so the video is upscaled and looks soft); the phone
+  shows a hint in its settings sheet ("PC screen too small ... raise the UI scale": a higher scale
+  makes the requested window smaller, so it fits).
 - `{"type":"offer","sessionId":"...","sdp":"..."}` (host makes the offer:
   sendonly H.264 video + data channel `input`), sent once the app window is found
   and the peer connection is ready.
@@ -92,7 +103,7 @@ Host → phone:
 - `{"type":"error","message":"..."}` for problems that belong to no session
   (bad JSON, unknown sessionId in a later message).
 
-Order for one `open`: `opened` → (`title`) → `offer` → `ice`*, or `opened` → `closed`.
+Order for one `open`: `opened` → (`title`) → `window` → `offer` → `ice`*, or `opened` → `closed`.
 
 ### Data channel `input` (ordered, reliable, JSON text)
 All `x`,`y` are normalised 0..1 over the video frame (0,0 = top-left).
@@ -120,12 +131,26 @@ All `x`,`y` are normalised 0..1 over the video frame (0,0 = top-left).
 | Pressure / tilt | Sent as real Windows pen input | — |
 | Scroll / zoom | — | Two-finger drag = wheel; pinch = zoom the phone's view (local) |
 
-**Keyboard: on-screen only.** Penlink's own coding keyboard: letters, numbers,
-symbols, Ctrl, Alt, Shift, Win, Esc, Tab, arrows, Home/End, PgUp/PgDn, F1–F12.
-Modifiers are sticky (tap once = next key, tap twice = locked). Sends `key`
-messages with Windows VK codes. A button switches to the phone's normal
-keyboard (sent as `text`) for long text and voice typing.
+**Keyboard: the phone's own keyboard plus one row of extra keys.** One keyboard button shows or hides
+the system IME (through a hidden focused text sink). Committed text goes out as 	ext; Backspace,
+Enter, Tab and Delete from the IME go out as key. A single row of extra keys is docked on top of
+the IME and follows its animation: Fn (swaps the row to F1-F12), Esc, Tab, Ctrl, Alt, Shift, Win,
+arrows, Home, End, PgUp, PgDn, Del. Modifiers are sticky: tap = next key only, tap again = locked,
+tap again = released. While a modifier is down, characters typed in the IME are sent as real key
+combos (key down/up with the US virtual-key of that character) instead of 	ext; Hebrew letters
+map to the key at the same physical position on the standard Hebrew layout (ש = A, נ = B, ב = C ...),
+so Ctrl+<ב> is Ctrl+C.
 
+**Keyboard and window size.** While the IME and the extra row are visible the phone shows the video only
+in the area above them and sends esize for that area (width = screen width, height = screen height minus
+IME minus row), debounced (250 ms), so the PC window gets exactly that area. Hiding the keyboard restores
+the full size.
+
+**Reconnecting.** If the WebSocket drops (host restarted or crashed, network change) the phone keeps its
+tabs in a "reconnecting" state, retries with backoff (0.5, 1, 2, 4, 5 s) and, once connected, re-opens
+every tab with open + "attach":true (same appId, new session). After 30 s without success it shows
+that the PC is unreachable with a Retry button (and keeps trying every 10 s). A tab whose app has exited
+comes back as closed with reason pp exited and is removed.
 ## Done means
 - `cargo build --release` and `cargo test` pass in `host/`.
 - `./gradlew assembleDebug` and unit tests pass in `android/`.

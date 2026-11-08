@@ -379,8 +379,8 @@ async fn ws_loop(socket: WebSocket, st: Arc<AppState>) {
             }
         };
         match cm {
-            ClientMsg::Open { app_id, width, height, scale } => {
-                tokio::spawn(do_open(st.clone(), out_tx.clone(), sessions.clone(), app_id, width, height, scale));
+            ClientMsg::Open { app_id, width, height, scale, attach } => {
+                tokio::spawn(do_open(st.clone(), out_tx.clone(), sessions.clone(), app_id, width, height, scale, attach));
             }
             ClientMsg::Answer { session_id, sdp } => {
                 if let Some(s) = get_session(&sessions, &session_id).await {
@@ -406,8 +406,18 @@ async fn ws_loop(socket: WebSocket, st: Arc<AppState>) {
             }
             ClientMsg::Resize { session_id, width, height, scale } => {
                 if let Some(s) = get_session(&sessions, &session_id).await {
-                    if let Err(e) = s.resize(width, height, scale).await {
-                        let _ = out_tx.send(ServerMsg::Error { message: format!("resize failed: {e}") });
+                    match s.resize(width, height, scale).await {
+                        Ok(w) => {
+                            let _ = out_tx.send(ServerMsg::Window {
+                                session_id: s.id.clone(),
+                                width: w.width,
+                                height: w.height,
+                                fitted: w.fitted,
+                            });
+                        }
+                        Err(e) => {
+                            let _ = out_tx.send(ServerMsg::Error { message: format!("resize failed: {e}") });
+                        }
                     }
                 } else {
                     unknown_session(&out_tx, &session_id);
@@ -466,6 +476,7 @@ async fn do_open(
     width: u32,
     height: u32,
     scale: f64,
+    attach: bool,
 ) {
     // Accept first: the phone gets a session id (and a pending tab) before anything slow
     // happens, so every later `closed` refers to a session it knows.
@@ -487,13 +498,14 @@ async fn do_open(
     };
     tracing::info!("open {:?} ({app_id}) {width}x{height} @{scale} -> session {session_id}", target.name);
 
-    let found = tokio::task::spawn_blocking(move || launcher::launch_and_find(&target, LAUNCH_TIMEOUT)).await;
+    let found = tokio::task::spawn_blocking(move || launcher::launch_and_find(&target, LAUNCH_TIMEOUT, attach)).await;
     let found = match found {
         Ok(Ok(f)) => f,
         Ok(Err(e)) => {
             tracing::warn!("open failed: {e}");
             if sessions.pending.lock().await.remove(&session_id) {
-                fail(format!("error: {e}"));
+                // A reattach that finds no window means the app is gone: not an error.
+                fail(if attach && e.to_string() == "app exited" { "app exited".to_string() } else { format!("error: {e}") });
             }
             return;
         }
@@ -512,7 +524,7 @@ async fn do_open(
         let _ = out.send(ServerMsg::Title { session_id: session_id.clone(), title: found.title.clone() });
     }
 
-    let opened = match Session::open(session_id.clone(), app_id.clone(), found.hwnd, found.title.clone(), width, height, scale).await {
+    let opened = match Session::open(session_id.clone(), app_id.clone(), found.hwnd, found.title.clone(), width, height, scale, found.claim).await {
         Ok(o) => o,
         Err(e) => {
             tracing::warn!("session setup failed: {e:#}");
@@ -529,6 +541,8 @@ async fn do_open(
     }
     sessions.ready.lock().await.insert(session_id.clone(), session.clone());
 
+    let w = opened.window;
+    let _ = out.send(ServerMsg::Window { session_id: session_id.clone(), width: w.width, height: w.height, fitted: w.fitted });
     let _ = out.send(ServerMsg::Offer { session_id: session_id.clone(), sdp: session.offer_sdp.clone() });
 
     // Local ICE candidates (trickle) - only after the offer went out.

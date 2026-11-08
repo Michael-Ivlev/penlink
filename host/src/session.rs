@@ -2,6 +2,7 @@
 
 use crate::geom::client_size_for;
 use crate::input::{Injector, Shared};
+use crate::launcher::Claim;
 use crate::pipeline::{self, PipelineEvent, PipelineHandle};
 use crate::protocol::InputMsg;
 use crate::winutil::{self, Hwnd};
@@ -59,11 +60,30 @@ pub struct Session {
     remote_set: AtomicBool,
     pending_ice: Mutex<Vec<RTCIceCandidateInit>>,
     closed: AtomicBool,
+    /// Serialises window resizes so the last request wins.
+    resize_lock: Mutex<()>,
+    /// Keeps the window reserved for this session until it is dropped.
+    claim: StdMutex<Option<Claim>>,
     pub offer_sdp: String,
+}
+
+/// The PC window the session streams, as reported to the phone (`window` message).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WindowReport {
+    pub width: i32,
+    pub height: i32,
+    pub fitted: bool,
+}
+
+impl From<winutil::Resized> for WindowReport {
+    fn from(r: winutil::Resized) -> Self {
+        Self { width: r.got.0, height: r.got.1, fitted: r.fitted }
+    }
 }
 
 pub struct OpenedSession {
     pub session: Arc<Session>,
+    pub window: WindowReport,
     /// Local ICE candidates, to be forwarded to the phone (after the offer was sent).
     pub ice_rx: UnboundedReceiver<RTCIceCandidateInit>,
     /// Window closed / errors.
@@ -98,13 +118,16 @@ impl Session {
         width: u32,
         height: u32,
         scale: f64,
+        claim: Claim,
     ) -> Result<OpenedSession> {
         // Size the app window first so the first captured frame is already right.
         let (cw, ch) = client_size_for(width, height, scale);
         let got = tokio::task::spawn_blocking(move || winutil::resize_client(hwnd, cw, ch)).await??;
-        tracing::info!("window {hwnd:#x} client {}x{} (wanted {cw}x{ch})", got.0, got.1);
+        tracing::info!("window {hwnd:#x} client {}x{} (wanted {cw}x{ch}, fitted {})", got.got.0, got.got.1, got.fitted);
+        let window = WindowReport::from(got);
 
-        let shared = Shared::new(crate::geom::even(width), crate::geom::even(height));
+        let (vw, vh) = crate::geom::clamp_video(width, height);
+        let shared = Shared::new(vw, vh);
 
         // --- WebRTC
         let mut media = MediaEngine::default();
@@ -261,9 +284,11 @@ impl Session {
             remote_set: AtomicBool::new(false),
             pending_ice: Mutex::new(Vec::new()),
             closed: AtomicBool::new(false),
+            resize_lock: Mutex::new(()),
+            claim: StdMutex::new(Some(claim)),
             offer_sdp,
         });
-        Ok(OpenedSession { session, ice_rx, events_rx })
+        Ok(OpenedSession { session, window, ice_rx, events_rx })
     }
 
     pub async fn apply_answer(&self, sdp: String) -> Result<()> {
@@ -298,15 +323,17 @@ impl Session {
         }
     }
 
-    pub async fn resize(&self, width: u32, height: u32, scale: f64) -> Result<()> {
+    pub async fn resize(&self, width: u32, height: u32, scale: f64) -> Result<WindowReport> {
+        let _one_at_a_time = self.resize_lock.lock().await;
         let (cw, ch) = client_size_for(width, height, scale);
         let hwnd = self.hwnd;
         let got = tokio::task::spawn_blocking(move || winutil::resize_client(hwnd, cw, ch)).await??;
-        tracing::info!("resized window to client {}x{} (wanted {cw}x{ch})", got.0, got.1);
-        self.shared.video_w.store(crate::geom::even(width), Ordering::Relaxed);
-        self.shared.video_h.store(crate::geom::even(height), Ordering::Relaxed);
+        tracing::info!("resized window to client {}x{} (wanted {cw}x{ch}, fitted {})", got.got.0, got.got.1, got.fitted);
+        let (vw, vh) = crate::geom::clamp_video(width, height);
+        self.shared.video_w.store(vw, Ordering::Relaxed);
+        self.shared.video_h.store(vh, Ordering::Relaxed);
         self.request_keyframe();
-        Ok(())
+        Ok(got.into())
     }
 
     /// Stop everything. Does not touch the app itself.
@@ -325,6 +352,8 @@ impl Session {
         })
         .await;
         let _ = self.pc.close().await;
+        // Capture and input threads are gone: the window may be opened again.
+        self.claim.lock().unwrap().take();
     }
 }
 

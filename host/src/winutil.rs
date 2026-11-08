@@ -221,7 +221,7 @@ pub fn primary_work_area() -> Rect {
 /// Restore the window if minimised/maximised, then size it so its client area is
 /// `cw` x `ch` (shrunk to fit the primary monitor, aspect kept) and put it on the primary
 /// monitor. Returns the achieved client size. Blocking (synchronous SetWindowPos).
-pub fn resize_client(h: Hwnd, cw: i32, ch: i32) -> Result<(i32, i32)> {
+pub fn resize_client(h: Hwnd, cw: i32, ch: i32) -> Result<Resized> {
     unsafe {
         let w = hwnd(h);
         if !IsWindow(Some(w)).as_bool() {
@@ -247,6 +247,9 @@ pub fn resize_client(h: Hwnd, cw: i32, ch: i32) -> Result<(i32, i32)> {
             ((r.right - r.left) - cw, (r.bottom - r.top) - ch)
         };
         let (ew, eh) = extra(cw, ch);
+        let wanted = (cw, ch);
+        // Too big for the PC screen: shrink, keeping the aspect ratio of the request. The video
+        // stays at the requested pixel size (the phone's picture is then upscaled).
         let (cw, ch) = fit_within(cw, ch, (work.w - ew).max(1), (work.h - eh).max(1));
         let (mut ow, mut oh) = (cw + ew, ch + eh);
         let (x, y) = (work.x, work.y);
@@ -270,8 +273,19 @@ pub fn resize_client(h: Hwnd, cw: i32, ch: i32) -> Result<(i32, i32)> {
             oh += dh;
             std::thread::sleep(std::time::Duration::from_millis(30));
         }
-        Ok(got)
+        Ok(Resized { wanted, got, fitted: (cw, ch) != wanted })
     }
+}
+
+/// Outcome of [`resize_client`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Resized {
+    /// Client size asked for.
+    pub wanted: (i32, i32),
+    /// Client size the window really has.
+    pub got: (i32, i32),
+    /// The request did not fit the PC screen and was shrunk (aspect ratio kept).
+    pub fitted: bool,
 }
 
 /// Bring a window to the foreground even though we are a background process.

@@ -20,6 +20,9 @@ pub enum ClientMsg {
         height: u32,
         #[serde(default = "default_scale")]
         scale: f64,
+        /// Re-open after a reconnect: attach to the app's existing window, never launch it.
+        #[serde(default)]
+        attach: bool,
     },
     #[serde(rename_all = "camelCase")]
     Answer { session_id: String, sdp: String },
@@ -59,6 +62,10 @@ pub enum ServerMsg {
     /// Window title became known / changed (optional, after `opened`).
     #[serde(rename_all = "camelCase")]
     Title { session_id: String, title: String },
+    /// The real size of the PC window (client area, physical pixels) after an open or resize.
+    /// `fitted`: it was shrunk to fit the PC screen, so the video is upscaled.
+    #[serde(rename_all = "camelCase")]
+    Window { session_id: String, width: i32, height: i32, fitted: bool },
     #[serde(rename_all = "camelCase")]
     Offer { session_id: String, sdp: String },
     #[serde(rename_all = "camelCase")]
@@ -208,15 +215,18 @@ mod tests {
         .unwrap();
         assert_eq!(
             m,
-            ClientMsg::Open { app_id: "abc".into(), width: 1440, height: 3120, scale: 2.0 }
+            ClientMsg::Open { app_id: "abc".into(), width: 1440, height: 3120, scale: 2.0, attach: false }
         );
     }
 
     #[test]
-    fn open_scale_defaults_to_one() {
+    fn open_scale_defaults_to_one_and_attach_to_false() {
         let m: ClientMsg =
             serde_json::from_str(r#"{"type":"open","appId":"a","width":10,"height":20}"#).unwrap();
-        assert!(matches!(m, ClientMsg::Open { scale, .. } if scale == 1.0));
+        assert!(matches!(m, ClientMsg::Open { scale, attach: false, .. } if scale == 1.0));
+        let m: ClientMsg =
+            serde_json::from_str(r#"{"type":"open","appId":"a","width":10,"height":20,"attach":true}"#).unwrap();
+        assert!(matches!(m, ClientMsg::Open { attach: true, .. }));
     }
 
     #[test]
@@ -288,6 +298,9 @@ mod tests {
 
         let v = serde_json::to_value(ServerMsg::Title { session_id: "s".into(), title: "T".into() }).unwrap();
         assert_eq!(v, json!({"type":"title","sessionId":"s","title":"T"}));
+        let v = serde_json::to_value(ServerMsg::Window { session_id: "s".into(), width: 812, height: 1760, fitted: true })
+            .unwrap();
+        assert_eq!(v, json!({"type":"window","sessionId":"s","width":812,"height":1760,"fitted":true}));
         let v = serde_json::to_value(ServerMsg::Closed { session_id: "s".into(), reason: "app exited".into() }).unwrap();
         assert_eq!(v, json!({"type":"closed","sessionId":"s","reason":"app exited"}));
 

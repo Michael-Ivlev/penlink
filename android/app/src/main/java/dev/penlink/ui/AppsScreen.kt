@@ -1,5 +1,13 @@
 package dev.penlink.ui
 
+import androidx.compose.foundation.layout.heightIn
+import androidx.compose.ui.text.input.ImeAction
+import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.material3.TextFieldDefaults
+import androidx.compose.material3.TextField
+import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.foundation.text.KeyboardActions
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.setValue
 import android.graphics.Bitmap
@@ -16,7 +24,6 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
-import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.calculateEndPadding
 import androidx.compose.foundation.layout.calculateStartPadding
 import androidx.compose.foundation.layout.Row
@@ -27,7 +34,6 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.GridItemSpan
@@ -52,12 +58,8 @@ import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LargeTopAppBar
-import androidx.compose.material3.ListItem
-import androidx.compose.material3.ListItemDefaults
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
-import androidx.compose.material3.SearchBar
-import androidx.compose.material3.SearchBarDefaults
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBarDefaults
@@ -104,7 +106,6 @@ fun AppsScreen(app: PenlinkApp, conn: HostConnection) {
     var error by remember(conn) { mutableStateOf<String?>(null) }
     var reload by remember { mutableIntStateOf(0) }
     var query by remember { mutableStateOf("") }
-    var searching by remember { mutableStateOf(false) }
     val scroll = TopAppBarDefaults.exitUntilCollapsedScrollBehavior()
 
     LaunchedEffect(conn, reload) {
@@ -215,16 +216,7 @@ fun AppsScreen(app: PenlinkApp, conn: HostConnection) {
                 )
             }
             item(span = { GridItemSpan(maxLineSpan) }, key = "search") {
-                AppSearchBar(
-                    query = query,
-                    onQueryChange = { query = it },
-                    expanded = searching,
-                    onExpandedChange = { searching = it },
-                    results = shown,
-                    app = app,
-                    conn = conn,
-                    onOpen = { searching = false; openEntry(it) },
-                )
+                AppSearchField(query = query, onQueryChange = { query = it })
             }
             if (sessions.isNotEmpty()) {
                 item(span = { GridItemSpan(maxLineSpan) }, key = "open-now") {
@@ -281,61 +273,35 @@ private fun SectionTitle(text: String, modifier: Modifier = Modifier) {
     )
 }
 
-@OptIn(ExperimentalMaterial3Api::class)
+/**
+ * Inline search: filters the app grid below as you type. (Not a Material SearchBar: its expanded full-screen
+ * results list sat inside the LazyVerticalGrid, a lazy list inside a lazy list, which crashed on tap.)
+ */
 @Composable
-private fun AppSearchBar(
-    query: String,
-    onQueryChange: (String) -> Unit,
-    expanded: Boolean,
-    onExpandedChange: (Boolean) -> Unit,
-    results: List<AppEntry>,
-    app: PenlinkApp,
-    conn: HostConnection,
-    onOpen: (AppEntry) -> Unit,
-) {
-    SearchBar(
-        inputField = {
-            SearchBarDefaults.InputField(
-                query = query,
-                onQueryChange = onQueryChange,
-                onSearch = { onExpandedChange(false) },
-                expanded = expanded,
-                onExpandedChange = onExpandedChange,
-                placeholder = { Text("Search apps") },
-                leadingIcon = { Icon(Icons.Default.Search, contentDescription = null) },
-                trailingIcon = {
-                    if (query.isNotEmpty()) {
-                        IconButton(onClick = { onQueryChange("") }) { Icon(Icons.Default.Clear, contentDescription = "Clear search") }
-                    }
-                },
-            )
-        },
-        expanded = expanded,
-        onExpandedChange = onExpandedChange,
-        // The status-bar inset only matters for the full-screen expanded state; the collapsed bar sits in the list.
-        windowInsets = if (expanded) SearchBarDefaults.windowInsets else WindowInsets(0, 0, 0, 0),
-        modifier = Modifier.fillMaxWidth(),
-    ) {
-        if (results.isEmpty()) {
-            Text(
-                "No matching apps",
-                style = MaterialTheme.typography.bodyLarge,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                modifier = Modifier.padding(Spacing.xl),
-            )
-        } else {
-            LazyColumn {
-                items(results, key = { it.id }) { a ->
-                    ListItem(
-                        headlineContent = { Text(a.name, maxLines = 1, overflow = TextOverflow.Ellipsis) },
-                        leadingContent = { AppIcon(app, conn, a.id, a.name, 44.dp) },
-                        colors = ListItemDefaults.colors(containerColor = Color.Transparent),
-                        modifier = Modifier.clickable { onOpen(a) },
-                    )
-                }
+private fun AppSearchField(query: String, onQueryChange: (String) -> Unit) {
+    val focus = LocalFocusManager.current
+    TextField(
+        value = query,
+        onValueChange = onQueryChange,
+        placeholder = { Text("Search apps") },
+        leadingIcon = { Icon(Icons.Default.Search, contentDescription = null) },
+        trailingIcon = {
+            if (query.isNotEmpty()) {
+                IconButton(onClick = { onQueryChange("") }) { Icon(Icons.Default.Clear, contentDescription = "Clear search") }
             }
-        }
-    }
+        },
+        singleLine = true,
+        shape = CircleShape,
+        keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
+        keyboardActions = KeyboardActions(onSearch = { focus.clearFocus() }),
+        colors = TextFieldDefaults.colors(
+            focusedContainerColor = MaterialTheme.colorScheme.surfaceContainerHigh,
+            unfocusedContainerColor = MaterialTheme.colorScheme.surfaceContainerHigh,
+            focusedIndicatorColor = Color.Transparent,
+            unfocusedIndicatorColor = Color.Transparent,
+        ),
+        modifier = Modifier.fillMaxWidth().heightIn(min = 56.dp),
+    )
 }
 
 /** The icon of an app, fetched once and cached; a coloured tile with the first letter until (or unless) it arrives. */

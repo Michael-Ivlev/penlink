@@ -1,5 +1,6 @@
 package dev.penlink
 
+import androidx.compose.runtime.getValue
 import android.app.Activity
 import android.content.Intent
 import android.content.pm.ApplicationInfo
@@ -8,21 +9,37 @@ import android.widget.Toast
 import androidx.lifecycle.lifecycleScope
 import dev.penlink.data.Quality
 import dev.penlink.data.SavedHost
-import dev.penlink.data.StreamPrefs
 import dev.penlink.protocol.AppEntry
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
+import androidx.activity.SystemBarStyle
 import androidx.activity.enableEdgeToEdge
+import androidx.core.splashscreen.SplashScreen.Companion.installSplashScreen
+import androidx.compose.foundation.isSystemInDarkTheme
+import androidx.compose.runtime.DisposableEffect
+import dev.penlink.ui.PairScreen
+import dev.penlink.ui.theme.PenlinkTheme
+import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.AnimatedContentTransitionScope
+import androidx.compose.animation.ExitTransition
+import androidx.compose.animation.ContentTransform
+import androidx.compose.animation.SizeTransform
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.scaleIn
+import androidx.compose.animation.slideInHorizontally
+import androidx.compose.animation.slideOutHorizontally
+import androidx.compose.animation.togetherWith
+import dev.penlink.rtc.HostConnection
 import androidx.core.view.WindowInsetsCompat
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
-import androidx.compose.material3.darkColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.getValue
 import androidx.compose.ui.platform.LocalContext
 import dev.penlink.ui.AppsScreen
 import dev.penlink.ui.HostsScreen
@@ -30,11 +47,21 @@ import dev.penlink.ui.SessionScreen
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
+        installSplashScreen()
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
         val app = application as PenlinkApp
         setContent {
-            MaterialTheme(colorScheme = darkColorScheme()) {
+            val dark = isSystemInDarkTheme()
+            // Transparent system bars; the icon colour follows the theme (the activity handles uiMode changes itself).
+            DisposableEffect(dark) {
+                enableEdgeToEdge(
+                    statusBarStyle = SystemBarStyle.auto(android.graphics.Color.TRANSPARENT, android.graphics.Color.TRANSPARENT) { dark },
+                    navigationBarStyle = SystemBarStyle.auto(android.graphics.Color.TRANSPARENT, android.graphics.Color.TRANSPARENT) { dark },
+                )
+                onDispose { }
+            }
+            PenlinkTheme(darkTheme = dark) {
                 Surface(color = MaterialTheme.colorScheme.background) {
                     Root(app)
                 }
@@ -117,6 +144,37 @@ fun Activity.windowPixels(): Pair<Int, Int> {
     return (b.width() - l - r).coerceAtLeast(1) to (b.height() - t - bt).coerceAtLeast(1)
 }
 
+/** What the root shows: the screen plus the connection it needs (each content keeps the connection it was composed with). */
+private data class Dest(val screen: Screen, val conn: HostConnection?)
+
+private fun Screen.depth(): Int = when (this) {
+    Screen.Hosts -> 0
+    Screen.Pair, Screen.Apps -> 1
+    is Screen.Session -> 2
+}
+
+/**
+ * Between list-like screens: shared-axis X (a short slide plus fade, direction from the depth). Into a session: the
+ * previous screen fades out and the session scales/fades in. Out of a session: the remote picture is removed at once
+ * (a SurfaceView cannot be faded reliably) and the Apps screen fades in.
+ */
+private fun AnimatedContentTransitionScope<Dest>.rootTransition(): ContentTransform {
+    val from = initialState.screen
+    val to = targetState.screen
+    val spec = when {
+        to is Screen.Session ->
+            (fadeIn(tween(220, delayMillis = 90)) + scaleIn(tween(220, delayMillis = 90), initialScale = 0.94f)) togetherWith fadeOut(tween(90))
+        from is Screen.Session -> fadeIn(tween(200)) togetherWith ExitTransition.None
+        else -> {
+            val forward = to.depth() >= from.depth() && !(to == Screen.Hosts)
+            val dir = if (forward) 1 else -1
+            (slideInHorizontally(tween(300)) { it / 10 * dir } + fadeIn(tween(210, delayMillis = 90))) togetherWith
+                (slideOutHorizontally(tween(300)) { -it / 10 * dir } + fadeOut(tween(90)))
+        }
+    }
+    return spec.using(SizeTransform(clip = false))
+}
+
 @Composable
 private fun Root(app: PenlinkApp) {
     val screen by app.screen.collectAsState()
@@ -125,9 +183,20 @@ private fun Root(app: PenlinkApp) {
     LaunchedEffect(conn) {
         conn?.notices?.collect { Toast.makeText(ctx, it, Toast.LENGTH_LONG).show() }
     }
-    when (val s = screen) {
-        Screen.Hosts -> HostsScreen(app)
-        Screen.Apps -> if (conn != null) AppsScreen(app, conn!!) else HostsScreen(app)
-        is Screen.Session -> if (conn != null) SessionScreen(app, conn!!, s.localId) else HostsScreen(app)
+    val needsConn = screen is Screen.Apps || screen is Screen.Session
+    val shown = if (needsConn && conn == null) Screen.Hosts else screen
+    AnimatedContent(
+        targetState = Dest(shown, conn),
+        transitionSpec = { rootTransition() },
+        contentKey = { it.screen::class },
+        label = "root",
+    ) { d ->
+        val c = d.conn
+        when (val s = d.screen) {
+            Screen.Hosts -> HostsScreen(app)
+            Screen.Pair -> PairScreen(app)
+            Screen.Apps -> if (c != null) AppsScreen(app, c) else HostsScreen(app)
+            is Screen.Session -> if (c != null) SessionScreen(app, c, s.localId) else HostsScreen(app)
+        }
     }
 }

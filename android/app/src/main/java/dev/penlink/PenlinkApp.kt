@@ -14,6 +14,7 @@ import kotlinx.coroutines.flow.asStateFlow
 
 sealed interface Screen {
     data object Hosts : Screen
+    data object Pair : Screen
     data object Apps : Screen
     data class Session(val localId: Long) : Screen
 }

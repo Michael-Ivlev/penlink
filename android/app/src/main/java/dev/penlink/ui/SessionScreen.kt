@@ -1,75 +1,51 @@
 package dev.penlink.ui
 
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.setValue
 import android.view.WindowManager
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.LocalActivity
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.slideInVertically
+import androidx.compose.animation.slideOutVertically
 import androidx.compose.foundation.background
-import androidx.compose.foundation.clickable
-import androidx.compose.foundation.horizontalScroll
-import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Minimize
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Keyboard
-import androidx.compose.material.icons.filled.Mouse
-import androidx.compose.material.icons.filled.TouchApp
-import androidx.compose.material.icons.filled.Tune
-import androidx.compose.material.icons.filled.ZoomOutMap
-import androidx.compose.material3.Button
-import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
-import androidx.compose.material3.FilterChip
-import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
-import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.ModalBottomSheet
-import androidx.compose.material3.Slider
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
-import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
-import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.clip
-import androidx.compose.foundation.gestures.detectTapGestures
-import androidx.compose.foundation.gestures.detectVerticalDragGestures
-import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalView
-import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
 import dev.penlink.PenlinkApp
-import dev.penlink.data.StreamPrefs
-import kotlin.math.roundToInt
 import dev.penlink.Screen
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.displayCutout
 import androidx.compose.foundation.layout.systemBarsIgnoringVisibility
-import androidx.compose.material3.Switch
 import androidx.compose.ui.platform.LocalLayoutDirection
 import androidx.compose.foundation.layout.ime
 import androidx.compose.foundation.layout.windowInsetsPadding
@@ -84,18 +60,14 @@ import androidx.compose.ui.platform.LocalDensity
 import dev.penlink.input.ImeMapping
 import dev.penlink.input.ImePiece
 import dev.penlink.input.KeyDef
-import dev.penlink.rtc.LinkState
 import dev.penlink.input.ImeCaptureView
 import dev.penlink.input.InputOverlayView
 import dev.penlink.input.KeyAction
 import dev.penlink.input.KeyboardLogic
 import dev.penlink.protocol.InputMsg
 import dev.penlink.rtc.HostConnection
-import dev.penlink.rtc.RemoteSession
-import dev.penlink.rtc.SessionStatus
 import dev.penlink.windowPixels
 import kotlinx.coroutines.delay
-import kotlinx.coroutines.launch
 import org.webrtc.RendererCommon
 import org.webrtc.SurfaceViewRenderer
 
@@ -325,84 +297,57 @@ fun SessionScreen(app: PenlinkApp, conn: HostConnection, selectedId: Long) {
 
         // Status overlay while connecting, reconnecting, or after the app closed.
         val linkState by conn.link.collectAsState()
-        when (val s = status) {
-            SessionStatus.Reconnecting ->
-                Column(Modifier.align(Alignment.Center).clip(RoundedCornerShape(12.dp)).background(Color(0xE61E1E2E)).padding(24.dp), horizontalAlignment = Alignment.CenterHorizontally) {
-                    if (linkState is LinkState.Unreachable) {
-                        Text("Can't reach ${conn.host.name}", color = Color.White, style = MaterialTheme.typography.titleMedium)
-                        Text(
-                            "No answer for 30 seconds. Is the PC on and penlink-host running? Still trying in the background.",
-                            color = Color.White,
-                            modifier = Modifier.padding(top = 6.dp),
-                        )
-                        Button(onClick = { conn.retryNow() }, modifier = Modifier.padding(top = 12.dp)) { Text("Retry now") }
-                    } else {
-                        CircularProgressIndicator(color = Color.White)
-                        Text("Reconnecting to ${conn.host.name}...", color = Color.White, modifier = Modifier.padding(top = 12.dp))
-                    }
-                }
-            SessionStatus.Opening, SessionStatus.Connecting ->
-                Column(Modifier.align(Alignment.Center).clip(RoundedCornerShape(12.dp)).background(Color(0xE61E1E2E)).padding(24.dp), horizontalAlignment = Alignment.CenterHorizontally) {
-                    CircularProgressIndicator(color = Color.White)
-                    Text(
-                        if (s == SessionStatus.Opening) "Opening $title..." else "Connecting...",
-                        color = Color.White,
-                        modifier = Modifier.padding(top = 12.dp),
-                    )
-                }
-            is SessionStatus.Closed -> Column(
-                Modifier.align(Alignment.Center).clip(RoundedCornerShape(12.dp)).background(Color(0xE61E1E2E)).padding(24.dp),
-                horizontalAlignment = Alignment.CenterHorizontally,
-            ) {
-                Text("$title closed (${s.reason})", color = Color.White)
-                Button(onClick = { conn.close(current); app.navigate(Screen.Apps) }) { Text("Close") }
-            }
-            SessionStatus.Live -> {}
-        }
+        SessionStatusOverlay(
+            status = status,
+            link = linkState,
+            hostName = conn.host.name,
+            title = title,
+            onRetry = { conn.retryNow() },
+            onCloseTab = { conn.close(current); app.navigate(Screen.Apps) },
+            modifier = Modifier.align(Alignment.Center),
+        )
 
         // Control bar (hidden by default, so the remote app has the whole screen): Minimize, Close, Keyboard,
         // trackpad, zoom reset, settings. A small pill in the top strip (the black safe-area margin above the video,
         // so it covers no part of the remote app) opens it by tap or swipe down.
-        if (barVisible) {
-            Row(
-                Modifier.fillMaxWidth().padding(top = with(density) { safeT.toDp() }, start = with(density) { safeL.toDp() }, end = with(density) { safeR.toDp() })
-                    .background(Color(0xE61E1E2E)).padding(horizontal = 4.dp, vertical = 2.dp),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                TrafficLight(TrafficKind.Close, "Close (ends the session and removes the virtual monitor)") {
+        AnimatedVisibility(
+            visible = barVisible,
+            modifier = Modifier.align(Alignment.TopCenter),
+            enter = slideInVertically(tween(240)) { -it } + fadeIn(tween(200)),
+            exit = slideOutVertically(tween(200)) { -it } + fadeOut(tween(160)),
+        ) {
+            SessionControlBar(
+                title = title,
+                trackpad = trackpad,
+                keyboardVisible = imeVisible,
+                onClose = {
                     imeRef?.hide()
                     conn.close(current)
                     app.navigate(Screen.Apps)
-                }
-                TrafficLight(TrafficKind.Minimize, "Minimize (keeps the app running)") { minimize() }
-                Text(
-                    title, color = Color.White, maxLines = 1, overflow = TextOverflow.Ellipsis,
-                    modifier = Modifier.weight(1f).padding(horizontal = 8.dp),
-                    style = MaterialTheme.typography.labelLarge,
-                )
-                IconButton(onClick = { trackpad = !trackpad; activity_ticks++ }) {
-                    Icon(
-                        if (trackpad) Icons.Default.Mouse else Icons.Default.TouchApp,
-                        contentDescription = if (trackpad) "Trackpad mode (tap for direct)" else "Direct mode (tap for trackpad)",
-                        tint = Color.White,
-                    )
-                }
-                IconButton(onClick = { overlayRef?.resetZoom(); activity_ticks++ }) {
-                    Icon(Icons.Default.ZoomOutMap, contentDescription = "Reset zoom", tint = Color.White)
-                }
-                IconButton(onClick = { showSettings = true }) {
-                    Icon(Icons.Default.Tune, contentDescription = "Session settings", tint = Color.White)
-                }
-                IconButton(onClick = {
+                },
+                onMinimize = { minimize() },
+                onToggleTrackpad = { trackpad = !trackpad; activity_ticks++ },
+                onResetZoom = { overlayRef?.resetZoom(); activity_ticks++ },
+                onSettings = { showSettings = true },
+                onToggleKeyboard = {
                     if (imeVisible) imeRef?.hide() else imeRef?.show()
                     activity_ticks++
-                }) {
-                    Icon(Icons.Default.Keyboard, contentDescription = "Keyboard", tint = if (imeVisible) Color(0xFF89B4FA) else Color.White)
-                }
-            }
-        } else {
+                },
+                modifier = Modifier.padding(
+                    top = with(density) { safeT.toDp() } + 4.dp,
+                    start = with(density) { safeL.toDp() } + 8.dp,
+                    end = with(density) { safeR.toDp() } + 8.dp,
+                ),
+            )
+        }
+        AnimatedVisibility(
+            visible = !barVisible,
+            modifier = Modifier.align(Alignment.TopCenter),
+            enter = fadeIn(tween(200)),
+            exit = fadeOut(tween(120)),
+        ) {
             SessionHandle(
-                modifier = Modifier.align(Alignment.TopCenter).padding(start = with(density) { safeL.toDp() }, end = with(density) { safeR.toDp() }),
+                modifier = Modifier.padding(start = with(density) { safeL.toDp() }, end = with(density) { safeR.toDp() }),
                 stripHeight = with(density) { safeT.toDp() },
                 onOpen = { barVisible = true },
             )
@@ -424,125 +369,5 @@ fun SessionScreen(app: PenlinkApp, conn: HostConnection, selectedId: Long) {
 
     if (showSettings) {
         SettingsSheet(app, conn, current, activity?.windowPixels() ?: areaPx, onDismiss = { showSettings = false })
-    }
-}
-
-@OptIn(ExperimentalMaterial3Api::class)
-@Composable
-private fun SettingsSheet(app: PenlinkApp, conn: HostConnection, session: RemoteSession, screen: Pair<Int, Int>, onDismiss: () -> Unit) {
-    val scope = rememberCoroutineScope()
-    val prefs by session.prefs.collectAsState()
-    val (sw, sh) = screen
-    var sharp by remember { mutableStateOf(prefs.sharpText) }
-    val steps = StreamPrefs.steps(sharp, sw, sh)
-    var step by remember { mutableStateOf(steps.indexOf(StreamPrefs.snap(prefs.uiScale, steps)).toFloat()) }
-
-    fun apply(p: StreamPrefs) {
-        session.setPrefs(p)
-        scope.launch { app.store.setStreamPrefs(conn.host.address, p) }
-    }
-
-    ModalBottomSheet(onDismissRequest = onDismiss) {
-        Column(Modifier.padding(horizontal = 24.dp, vertical = 8.dp).padding(bottom = 24.dp)) {
-            val uiPercent = steps[step.roundToInt().coerceIn(0, steps.size - 1)]
-            Text("UI size: $uiPercent%", style = MaterialTheme.typography.titleMedium)
-            Text(
-                if (sharp) "Windows scales text and buttons. Windows allows at most ${steps.last()}% on this screen."
-                else "The PC draws at lower resolution and this phone enlarges it. Up to ${steps.last()}% on this screen.",
-                style = MaterialTheme.typography.bodySmall,
-            )
-            Slider(
-                value = step,
-                onValueChange = { step = it },
-                valueRange = 0f..(steps.size - 1).toFloat(),
-                steps = (steps.size - 2).coerceAtLeast(0),
-                onValueChangeFinished = { apply(prefs.copy(sharpText = sharp, uiScale = uiPercent)) },
-            )
-            Row(Modifier.fillMaxWidth().padding(top = 8.dp), verticalAlignment = Alignment.CenterVertically) {
-                Column(Modifier.weight(1f)) {
-                    Text("Sharp text", style = MaterialTheme.typography.titleMedium)
-                    Text(
-                        if (sharp) "Full phone resolution: crisp text, but the UI cannot get as big and more pixels are sent."
-                        else "Off: fewer pixels, faster, text is a little soft when enlarged.",
-                        style = MaterialTheme.typography.bodySmall,
-                    )
-                }
-                Switch(checked = sharp, onCheckedChange = { on ->
-                    sharp = on
-                    val p = prefs.copy(sharpText = on, uiScale = uiPercent).fitted(sw, sh)
-                    val newSteps = StreamPrefs.steps(on, sw, sh)
-                    step = newSteps.indexOf(p.uiScale).toFloat()
-                    apply(p)
-                })
-            }
-
-            Row(Modifier.fillMaxWidth().padding(top = 8.dp), verticalAlignment = Alignment.CenterVertically) {
-                Column(Modifier.weight(1f)) {
-                    Text("Resize app above keyboard", style = MaterialTheme.typography.titleMedium)
-                    Text(
-                        if (prefs.resizeAboveKeyboard) "On: the PC window shrinks to the area above the keyboard, so the app reflows."
-                        else "Off: the PC window keeps its size and the picture slides up so what you are working on stays visible above the keyboard.",
-                        style = MaterialTheme.typography.bodySmall,
-                    )
-                }
-                Switch(checked = prefs.resizeAboveKeyboard, onCheckedChange = { apply(prefs.copy(resizeAboveKeyboard = it)) })
-            }
-
-            val win by session.windowSize.collectAsState()
-            val size by session.requestedSize.collectAsState()
-            val w = win
-            Text("Showing", style = MaterialTheme.typography.titleMedium, modifier = Modifier.padding(top = 16.dp))
-            when {
-                w == null -> Text("Waiting for the PC...", style = MaterialTheme.typography.bodyMedium)
-                w.isMonitor -> {
-                    Text("Virtual monitor: ${w.width} x ${w.height} px", style = MaterialTheme.typography.bodyMedium)
-                    val dpi = w.dpi
-                    val up = if (w.width > 0) size.first.toDouble() / w.width else 1.0
-                    Text(
-                        "Windows DPI ${dpi ?: 100}%%, enlarged %.2fx here = UI size about %d%%".format(up, ((dpi ?: 100) * up).roundToInt()),
-                        style = MaterialTheme.typography.bodyMedium,
-                    )
-                    if (dpi != null && sharp && dpi != uiPercent) {
-                        Text("Windows used the nearest DPI step it allows ($dpi%, asked $uiPercent%).", style = MaterialTheme.typography.bodySmall)
-                    }
-                }
-                else -> {
-                    Text("The app's window: ${w.width} x ${w.height} px", style = MaterialTheme.typography.bodyMedium)
-                    Text(
-                        "No virtual monitor (is the SudoVDA display driver installed on the PC?), so menus and dialogs outside the app window do not show.",
-                        style = MaterialTheme.typography.bodySmall,
-                        modifier = Modifier.padding(top = 2.dp),
-                    )
-                    if (w.fitted) {
-                        Text(
-                            fittedHint(size.first, w.width),
-                            color = MaterialTheme.colorScheme.error,
-                            style = MaterialTheme.typography.bodyMedium,
-                            modifier = Modifier.padding(top = 4.dp),
-                        )
-                    }
-                }
-            }
-            Text("Phone area: ${size.first} x ${size.second} px", style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(top = 4.dp))
-        }
-    }
-}
-
-/**
- * The always-visible way to the control bar: a thin pill centred in the top strip. The strip (status bar / cutout
- * height) is outside the video, so tapping it never reaches the remote app; when a phone has no such strip the pill is
- * only a few dp tall at the very top. Tap or swipe down opens the bar.
- */
-@Composable
-private fun SessionHandle(modifier: Modifier, stripHeight: androidx.compose.ui.unit.Dp, onOpen: () -> Unit) {
-    val h = stripHeight.coerceIn(14.dp, 36.dp)
-    Box(
-        modifier
-            .width(140.dp).height(h)
-            .pointerInput(Unit) { detectTapGestures { onOpen() } }
-            .pointerInput(Unit) { detectVerticalDragGestures { _, dy -> if (dy > 4f) onOpen() } },
-        contentAlignment = Alignment.Center,
-    ) {
-        Box(Modifier.clip(RoundedCornerShape(50)).background(Color(0x99FFFFFF)).size(width = 56.dp, height = 6.dp))
     }
 }

@@ -351,11 +351,9 @@ mod win {
         }
         let (title, body) = split_texts(&texts);
         if !logos.lock().unwrap().contains_key(&app_id) {
-            if let Ok(bytes) = disp.GetLogo(Size { Width: 64.0, Height: 64.0 }).and_then(|r| read_logo(&r)) {
-                if !bytes.is_empty() {
-                    logos.lock().unwrap().insert(app_id.clone(), bytes);
-                }
-            }
+            // An app without a readable logo is remembered too (empty), so it is not retried every second.
+            let bytes = disp.GetLogo(Size { Width: 64.0, Height: 64.0 }).and_then(|r| read_logo(&r)).unwrap_or_default();
+            logos.lock().unwrap().insert(app_id.clone(), bytes);
         }
         Ok(Notif {
             id: n.Id()?,
@@ -369,10 +367,11 @@ mod win {
 
     fn read_logo(r: &RandomAccessStreamReference) -> WResult<Vec<u8>> {
         let stream = r.OpenReadAsync()?.join()?;
-        let size = stream.Size()? as u32;
-        if size == 0 || size > 4 * 1024 * 1024 {
+        let size64 = stream.Size()?;
+        if size64 == 0 || size64 > 4 * 1024 * 1024 {
             return Ok(Vec::new());
         }
+        let size = size64 as u32;
         let reader = DataReader::CreateDataReader(&stream.GetInputStreamAt(0)?)?;
         reader.LoadAsync(size)?.join()?;
         let mut buf = vec![0u8; size as usize];
@@ -419,7 +418,7 @@ impl Source for WinSource {
         win::remove(id)
     }
     fn logo(&self, app_id: &str) -> Option<Vec<u8>> {
-        self.logos.lock().unwrap().get(app_id).cloned()
+        self.logos.lock().unwrap().get(app_id).filter(|b| !b.is_empty()).cloned()
     }
 }
 

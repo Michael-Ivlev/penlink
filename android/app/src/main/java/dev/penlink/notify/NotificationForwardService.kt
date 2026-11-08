@@ -21,6 +21,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
@@ -36,6 +37,8 @@ class NotificationForwardService : Service() {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     private val links = HashMap<String, NotifyLink>()
     private val watchers = HashMap<String, Job>()
+    // Events of one PC are handled strictly in order (a logo download must not let a later "removed" overtake its "posted").
+    private val queues = HashMap<String, Channel<NotifyIn>>()
     private lateinit var notifier: PcNotifier
 
     override fun onBind(intent: Intent?): IBinder? = null
@@ -45,7 +48,14 @@ class NotificationForwardService : Service() {
         val app = application as PenlinkApp
         notifier = PcNotifier(this, app.api)
         ensureChannel()
-        startForeground(ONGOING_ID, ongoing(emptyList(), emptyList()), ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE)
+        try {
+            startForeground(ONGOING_ID, ongoing(emptyList(), emptyList()), ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE)
+        } catch (e: Exception) {
+            // Android refused a foreground start from the background (e.g. ForegroundServiceStartNotAllowedException):
+            // stop quietly; the next app launch starts forwarding again.
+            stopSelf()
+            return
+        }
 
         scope.launch {
             app.store.notifHosts.collect { hosts ->
@@ -72,13 +82,17 @@ class NotificationForwardService : Service() {
             // A re-paired PC has a new token: restart its link.
             if (keep == null || links[a]!!.host.token != keep.token) {
                 watchers.remove(a)?.cancel()
+                queues.remove(a)?.close()
                 links.remove(a)?.stop()
                 NotifyHub.unregister(a)
             }
         }
         for (h in hosts) {
             if (links.containsKey(h.address)) continue
-            val link = NotifyLink(h, app.api.http, scope) { ev -> handle(app, h, ev) }
+            val queue = Channel<NotifyIn>(Channel.UNLIMITED)
+            queues[h.address] = queue
+            scope.launch { for (ev in queue) runCatching { handle(app, h, ev) } }
+            val link = NotifyLink(h, app.api.http, scope) { ev -> queue.trySend(ev) }
             links[h.address] = link
             NotifyHub.register(link)
             watchers[h.address] = scope.launch { link.status.collect { NotifyHub.publish(h.address, it) } }
@@ -86,11 +100,11 @@ class NotificationForwardService : Service() {
         }
     }
 
-    private fun handle(app: PenlinkApp, host: SavedHost, ev: NotifyIn) {
+    private suspend fun handle(app: PenlinkApp, host: SavedHost, ev: NotifyIn) {
         when (ev) {
             is NotifyIn.Ready -> notifier.keepOnly(host, ev.ids)
             is NotifyIn.Removed -> notifier.remove(host, ev.id)
-            is NotifyIn.Posted -> scope.launch {
+            is NotifyIn.Posted -> {
                 app.store.updateNotifPrefs(host.address) { it.withSeen(ev.appId, ev.appName) }
                 val prefs = app.store.notifPrefs(host.address).first()
                 if (prefs.allows(ev.appId)) notifier.post(host, ev)
@@ -140,6 +154,8 @@ class NotificationForwardService : Service() {
                 NotifyHub.unregister(a)
             }
             links.clear()
+            queues.values.forEach { it.close() }
+            queues.clear()
         }
         scope.cancel()
         super.onDestroy()

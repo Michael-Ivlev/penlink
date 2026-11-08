@@ -27,6 +27,9 @@ sealed interface NotifyStatus {
 
     /** Up. [access] is the host's report on Windows' permission: allowed, denied, unspecified or unavailable. */
     data class Connected(val access: String) : NotifyStatus
+
+    /** The PC refused the token (unpaired or revoked): retrying is pointless until the user pairs again. */
+    data object Unauthorized : NotifyStatus
 }
 
 /**
@@ -56,6 +59,7 @@ class NotifyLink(
                 _status.value = NotifyStatus.Connecting
                 val closed = CompletableDeferred<Boolean>() // true = it had been ready
                 var ready = false
+                var unauthorized = false
                 val req = Request.Builder().url(notifyWsUrl(host.address, host.token)).build()
                 val socket = client.newWebSocket(req, object : WebSocketListener() {
                     override fun onMessage(webSocket: WebSocket, text: String) {
@@ -76,6 +80,7 @@ class NotifyLink(
                     }
 
                     override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
+                        if (response?.code == 401) unauthorized = true
                         closed.complete(ready)
                     }
                 })
@@ -85,6 +90,10 @@ class NotifyLink(
                 } finally {
                     ws = null
                     socket.cancel()
+                }
+                if (unauthorized) {
+                    _status.value = NotifyStatus.Unauthorized
+                    return@launch
                 }
                 failures = if (wasReady) 0 else failures + 1
                 _status.value = NotifyStatus.Connecting

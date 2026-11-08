@@ -208,6 +208,7 @@ private fun MasterCard(host: SavedHost, enabled: Boolean, link: NotifyStatus?, o
                 val line = when {
                     !enabled -> "Off. Turn on to see ${host.name}'s notifications here."
                     link is NotifyStatus.Connected -> "Connected to ${host.name}"
+                    link is NotifyStatus.Unauthorized -> "${host.name} no longer accepts this phone. Pair it again."
                     else -> "Reaching ${host.name}…"
                 }
                 Text(line, style = MaterialTheme.typography.bodyMedium, color = if (enabled) cs.onPrimaryContainer else cs.onSurfaceVariant)

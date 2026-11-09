@@ -19,7 +19,7 @@ control and nothing is cut down.
 
 ## Why Penlink
 
-### 📱 Desktop apps that feel native on mobile
+### Desktop apps that feel native on mobile
 
 - **Made to the phone's shape.** Each app gets a screen on the PC created at the exact size and shape of your phone's
   screen. The app lays itself out for the phone, so nothing is shrunk, letterboxed or cut off.
@@ -31,32 +31,32 @@ control and nothing is cut down.
 - **Popups behave.** Menus, dialogs and file pickers show up on the phone too.
 - **Notifications on the phone.** The PC's notifications arrive as phone notifications, per app.
 
-### 🖊️ S Pen as a real Windows pen
+### The S Pen is a real Windows pen
 
 The S Pen is not turned into a mouse. It reaches Windows as a genuine pen, with **pressure, tilt, the barrel button
 and the eraser**, so drawing apps, handwriting, Windows Ink and pen gestures work as they would with a pen tablet.
 Palm rejection ignores your hand while the pen is near the screen.
 
-### ⚡ Blazing fast
+### Low latency
 
 Video goes over WebRTC with low-latency H.264, and input goes back over a WebRTC data channel. Touch-to-pixel latency
 was measured at about **27 ms** over a local connection, so the app feels like it is running on the phone. An
 optional stats overlay shows where every millisecond goes.
 
-### 🖥️ Doesn't take over your PC
+### Your PC's screens stay as they are
 
 Every app you open from the phone gets **its own virtual screen** on the PC. Your real monitors keep their layout and
 resolution, and the apps on the phone never cover what is on them. Close the app on the phone and its virtual screen disappears and
 the window goes back to your main monitor.
 
-### 🎛️ Full control
+### Full control
 
 - **Touch** goes to Windows as real touch, or switch to trackpad mode.
 - **Full keyboard:** the phone keyboard plus an extra-keys row (Esc, Tab, Ctrl, Alt, Win, arrows), so every shortcut
   works.
 - **Any app:** anything in the PC's Start Menu or Store apps, from an editor and a terminal to design and office apps.
 
-### 🔒 Private by default
+### Private by default
 
 The PC only answers on its own machine and on Tailscale (LAN is opt-in), and the phone pairs with a one-time 6-digit
 code. No cloud service in between.
@@ -77,20 +77,25 @@ it, Penlink falls back to capturing the app's window. The full protocol and beha
 
 You need a Windows 10/11 PC, an Android 13+ phone, and both on the same Tailscale network (or LAN).
 
-1. **PC:** build and run the host (see [`host/README.md`](host/README.md)):
-   ```bash
-   cd host
-   cargo build --release
-   target/release/penlink-host.exe
-   ```
-   It prints a 6-digit pairing code. On first start it asks once (UAC) to install the virtual display driver.
-2. **Phone:** build and install the app (see [`android/README.md`](android/README.md)):
-   ```bash
-   cd android
-   ./gradlew assembleDebug
-   adb install -r app/build/outputs/apk/debug/app-debug.apk
-   ```
-3. In the app tap **Add PC**, enter the PC's Tailscale address and the code, then tap an app.
+1. Download `penlink-host.exe` and `Penlink.apk` from the [latest release](https://github.com/Michael-Ivlev/penlink/releases/latest).
+2. **PC:** run `penlink-host.exe`. It prints a 6-digit pairing code. On first start it asks once (UAC) to install the
+   virtual display driver. Allow UDP ports 47801-48800 in Windows Firewall for your Tailscale/LAN profile.
+3. **Phone:** install `Penlink.apk` (allow installs from your browser or file manager when Android asks).
+4. In the app tap **Add PC**, enter the PC's Tailscale address and the code, then tap an app.
+
+### Building from source
+
+```bash
+cd host
+cargo build --release          # target/release/penlink-host.exe
+```
+
+```bash
+cd android
+./gradlew assembleDebug        # app/build/outputs/apk/debug/app-debug.apk
+```
+
+More detail in [`host/README.md`](host/README.md) and [`android/README.md`](android/README.md).
 
 ## Repository layout
 

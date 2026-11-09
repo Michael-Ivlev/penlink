@@ -13,6 +13,10 @@ gradlew.bat assembleDebug          # app/build/outputs/apk/debug/app-debug.apk
 gradlew.bat testDebugUnitTest      # JVM unit tests (protocol JSON, coordinate/tilt/VK mapping)
 ```
 
+Signed release build: put `storeFile`, `storePassword`, `keyAlias` and `keyPassword` in a properties file outside
+the repo and point `PENLINK_SIGNING` (or the `penlink.signing` Gradle property) at it, then run
+`gradlew.bat assembleRelease`. Without it the release APK is left unsigned.
+
 Install on a connected phone or emulator: `adb install -r app\build\outputs\apk\debug\app-debug.apk`.
 
 ## Connect to a host

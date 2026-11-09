@@ -1,11 +1,11 @@
 # Penlink
 
-**Remote control for your PC, where every desktop app looks and works like a phone app.**
+Use your PC's apps from an Android phone as if they were phone apps.
 
-Penlink gives you your PC from your Android phone, but not as a tiny desktop you pinch and zoom around. You pick an
-app from an app grid and it opens full screen, laid out for the phone, and you use it like any other phone app. It is
-still the real desktop program, with every menu, panel, shortcut and plugin it has on your PC, so you have full
-control and nothing is cut down.
+Remote desktop on a phone usually means your whole monitor shrunk onto a small screen, and you pinch and zoom around
+it. Penlink works per app instead. You pick an app from a grid on the phone, the PC creates a virtual monitor at the
+phone's exact screen size, and the app opens full screen on it. The app lays itself out for the phone, and you still
+get the real desktop program with all its menus and shortcuts.
 
 <p align="center">
   <img src="docs/screenshots/1-pcs.png" width="24%" alt="Your PCs">
@@ -14,52 +14,29 @@ control and nothing is cut down.
   <img src="docs/screenshots/4-notifications.png" width="24%" alt="PC notifications on the phone">
 </p>
 
-<sub>The images above are illustrations of the app's screens. Real captures from the end-to-end tests are in
+<sub>These are illustrations of the app's screens. Real captures from the end-to-end tests are in
 [`docs/e2e/`](docs/e2e).</sub>
 
-## Why Penlink
+## What it does
 
-### Desktop apps that feel native on mobile
-
-- **Made to the phone's shape.** Each app gets a screen on the PC created at the exact size and shape of your phone's
-  screen. The app lays itself out for the phone, so nothing is shrunk, letterboxed or cut off.
-- **Follows the phone.** Rotate it and the app re-lays itself out in portrait or landscape. Open the keyboard and the
-  app fits the space above it.
-- **Readable, touchable UI.** A UI size slider scales the interface up for a phone screen, saved per PC.
-- **Apps, not a desktop.** A searchable grid of the PC's apps. Open several and switch between them like phone apps;
-  minimise and close them from the phone.
-- **Popups behave.** Menus, dialogs and file pickers show up on the phone too.
-- **Notifications on the phone.** The PC's notifications arrive as phone notifications, per app.
-
-### The S Pen is a real Windows pen
-
-The S Pen is not turned into a mouse. It reaches Windows as a genuine pen, with **pressure, tilt, the barrel button
-and the eraser**, so drawing apps, handwriting, Windows Ink and pen gestures work as they would with a pen tablet.
-Palm rejection ignores your hand while the pen is near the screen.
-
-### Low latency
-
-Video goes over WebRTC with low-latency H.264, and input goes back over a WebRTC data channel. Touch-to-pixel latency
-was measured at about **27 ms** over a local connection, so the app feels like it is running on the phone. An
-optional stats overlay shows where every millisecond goes.
-
-### Your PC's screens stay as they are
-
-Every app you open from the phone gets **its own virtual screen** on the PC. Your real monitors keep their layout and
-resolution, and the apps on the phone never cover what is on them. Close the app on the phone and its virtual screen disappears and
-the window goes back to your main monitor.
-
-### Full control
-
-- **Touch** goes to Windows as real touch, or switch to trackpad mode.
-- **Full keyboard:** the phone keyboard plus an extra-keys row (Esc, Tab, Ctrl, Alt, Win, arrows), so every shortcut
-  works.
-- **Any app:** anything in the PC's Start Menu or Store apps, from an editor and a terminal to design and office apps.
-
-### Private by default
-
-The PC only answers on its own machine and on Tailscale (LAN is opt-in), and the phone pairs with a one-time 6-digit
-code. No cloud service in between.
+- Each app gets its own virtual monitor sized to the phone. Rotate the phone and the app re-lays itself out; open the
+  keyboard and it fits in the space above it.
+- Your real monitors aren't changed. When you close the app on the phone, its virtual monitor is removed and the window
+  goes back to your main screen.
+- The S Pen reaches Windows as a pen, not a mouse: pressure, tilt, the barrel button and the eraser all come through,
+  so Windows Ink and drawing apps work like they do with a pen tablet. Palm rejection ignores your hand while the pen
+  is near the screen.
+- Touch is sent as Windows touch, or you can switch to trackpad mode. The keyboard has an extra row for Esc, Tab,
+  Ctrl, Alt, Win and the arrows, so shortcuts work.
+- The phone shows a searchable grid of the PC's apps (Start Menu and Store apps). You can have several open and switch
+  between them.
+- Menus, dialogs and file pickers show up on the phone too, because they open on the same virtual monitor.
+- A UI size slider makes the interface bigger for a phone screen, saved per PC.
+- PC notifications are forwarded to the phone.
+- Latency is low: video is H.264 over WebRTC and input goes back on a data channel. I measured about 27 ms from touch
+  to pixel on a local connection. There's an optional stats overlay that breaks the time down.
+- The host only accepts connections from the PC itself and from Tailscale (LAN is opt-in). The phone pairs with a
+  one-time 6-digit code, and there's no cloud service in between.
 
 ## How it works
 
@@ -108,7 +85,8 @@ More detail in [`host/README.md`](host/README.md) and [`android/README.md`](andr
 
 ## Status
 
-Windows host and Android app work today. Hardware video encoding and a macOS host are planned.
+Early, but it works day to day. Windows host only, and video is encoded in software for now; hardware encoding and a
+macOS host are planned. Mostly tested on a Galaxy S26 Ultra, so reports from other phones are very welcome.
 
 ## License
 
